@@ -1,0 +1,6 @@
+Entity: Invisium
+Fiscal year: FY2026
+Audit objective: External financial statement audit.
+Framework: US GAAP
+Prepared by: MindWeave demo pack
+

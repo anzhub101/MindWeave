@@ -1,0 +1,15 @@
+{
+  "template_id": "financial_audit_v1",
+  "name": "Financial Audit",
+  "description": "Baseline enterprise audit template for uploaded financial documents.",
+  "program_id": "financial_audit_v1",
+  "program_version": "1.0.0",
+  "keywords": [
+    "financial audit",
+    "audit",
+    "financial statement",
+    "compliance",
+    "invisium"
+  ]
+}
+

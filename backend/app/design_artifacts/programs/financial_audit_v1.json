@@ -1,0 +1,111 @@
+{
+  "program_id": "financial_audit_v1",
+  "version": "1.0.0",
+  "template_id": "financial_audit_v1",
+  "policy": "priority_based",
+  "budget": {
+    "max_nodes": 12,
+    "max_tokens": 12000,
+    "max_runtime_seconds": 180
+  },
+  "convergence_rule": "no_pending_nodes",
+  "output_schema": "audit_report_schema_v1",
+  "deterministic_defaults": {
+    "temperature": 0,
+    "seed": 7
+  },
+  "nodes": [
+    {
+      "id": "audit_scope",
+      "title": "Audit Scope",
+      "subtitle": "Financial document mapping",
+      "operation_type": "generate",
+      "priority": 10,
+      "depends_on": [],
+      "next": ["financial_data_analysis"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 1, "row": 0}
+      }
+    },
+    {
+      "id": "financial_data_analysis",
+      "title": "Financial Data Analysis",
+      "subtitle": "Extract key metrics",
+      "operation_type": "analyze",
+      "priority": 20,
+      "depends_on": ["audit_scope"],
+      "next": ["compliance_check", "integrity_check"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 1, "row": 1}
+      }
+    },
+    {
+      "id": "compliance_check",
+      "title": "Compliance Check",
+      "subtitle": "Review policy adherence",
+      "operation_type": "verify",
+      "priority": 30,
+      "depends_on": ["financial_data_analysis"],
+      "next": ["risk_assessment"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 0, "row": 2}
+      }
+    },
+    {
+      "id": "integrity_check",
+      "title": "Integrity Check",
+      "subtitle": "Verify financial integrity",
+      "operation_type": "verify",
+      "priority": 40,
+      "depends_on": ["financial_data_analysis"],
+      "next": ["risk_assessment"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 2, "row": 2}
+      }
+    },
+    {
+      "id": "risk_assessment",
+      "title": "Risk Assessment",
+      "subtitle": "Identify potential issues",
+      "operation_type": "aggregate",
+      "priority": 50,
+      "depends_on": ["compliance_check", "integrity_check"],
+      "next": ["human_review"],
+      "guarded_by": ["compliance_check", "integrity_check"],
+      "metadata": {
+        "layout": {"column": 1, "row": 3}
+      }
+    },
+    {
+      "id": "human_review",
+      "title": "Human Review",
+      "subtitle": "Expert evaluation checkpoint",
+      "operation_type": "verify",
+      "priority": 60,
+      "depends_on": ["risk_assessment"],
+      "next": ["final_report_synthesis"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 1, "row": 4}
+      }
+    },
+    {
+      "id": "final_report_synthesis",
+      "title": "Final Report Synthesis",
+      "subtitle": "Produce audit opinion",
+      "operation_type": "synthesize",
+      "priority": 70,
+      "depends_on": ["human_review"],
+      "next": [],
+      "guarded_by": ["human_review"],
+      "metadata": {
+        "layout": {"column": 1, "row": 5}
+      }
+    }
+  ]
+}
+

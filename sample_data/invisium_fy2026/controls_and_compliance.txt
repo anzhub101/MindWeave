@@ -1,0 +1,12 @@
+Manual journal approval exceptions:
+- Three entries totaling USD 85000 lacked second-level approval.
+
+Revenue cutoff observations:
+- Twelve invoices totaling USD 214500 were recognized two days before shipment.
+
+Inventory count observation:
+- Dubai warehouse variance reached 2.7 percent of on-hand units.
+
+Management response:
+- Corrective actions are planned for Q1 FY2027.
+

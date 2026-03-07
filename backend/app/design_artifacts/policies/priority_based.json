@@ -1,0 +1,14 @@
+{
+  "policy_id": "priority_based",
+  "description": "Schedule the lowest priority number among dependency-ready nodes.",
+  "selection_strategy": "priority_then_id",
+  "expansion_rules": [
+    "Nodes may only create descendant nodes.",
+    "Verification gates must complete before guarded nodes execute."
+  ],
+  "exploration_limits": {
+    "max_parallel_nodes": 1,
+    "allow_dynamic_expansion": true
+  }
+}
+
