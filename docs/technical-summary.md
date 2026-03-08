@@ -28,6 +28,7 @@ The main MVP requirement groups are covered as follows.
 - Registries and Version History: [backend/app/services/artifact_registry_service.py](/Users/manzeem/MindWeave/backend/app/services/artifact_registry_service.py) persists programs, templates, policies, schemas, and evaluations as first-class versioned artifacts. Promotion history is recorded with justification and exposed through registry APIs.
 - Output Validation: the final structured output is validated against the synthesized JSON Schema before the run is considered healthy.
 - LLM Orchestration: [backend/app/services/llm_gateway.py](/Users/manzeem/MindWeave/backend/app/services/llm_gateway.py) uses K2 Think v2 via the agentic endpoint for program synthesis and node execution.
+- Determinism, audit, and graph controls: [docs/determinism-audit-and-graph-controls.md](/Users/manzeem/MindWeave/docs/determinism-audit-and-graph-controls.md) records the implemented determinism modes, replay/diff support, evidence graph, graph patches, approval gates, and control-level behavior.
 
 ## 3. Domain Behavior
 
@@ -64,3 +65,8 @@ The Optimization Plane is implemented as a benchmark-and-promotion loop rather t
 
 - Exact graph-level determinism for external hosted LLMs remains best-effort. Deterministic mode still enforces `temperature=0`, fixed scheduler ordering, and seeded execution where supported, but hosted-model providers can still introduce nondeterministic variance outside the application boundary.
 - Direct Supabase Postgres connectivity is optional in the current local environment. Supabase Storage and Chunkr OCR are live-verified, while ORM persistence continues to work against the configured local database path unless a reachable Postgres URL is supplied.
+
+## 7. Operational Docs
+
+- Runtime operations guide: [docs/runtime-operations-guide.md](/Users/manzeem/MindWeave/docs/runtime-operations-guide.md)
+- Determinism, audit, and graph controls: [docs/determinism-audit-and-graph-controls.md](/Users/manzeem/MindWeave/docs/determinism-audit-and-graph-controls.md)

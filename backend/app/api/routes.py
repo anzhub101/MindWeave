@@ -5,15 +5,23 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.api import (
+    ApplyPlannedChangeRequest,
     ArtifactPayloadRequest,
     ArtifactPayloadResponse,
     ArtifactPromotionResponse,
     ArtifactSummary,
+    GraphPatchRequest,
     ExperimentRunRequest,
     ExperimentRunResponse,
     OptimizationRunRequest,
     OptimizationRunResponse,
+    PlanChangeRequest,
+    PlanChangeResponse,
     PromotionRequest,
+    ReasoningTraceResponse,
+    ReplayTaskRequest,
+    RunDiffRequest,
+    RunDiffResponse,
     ReviewDecisionRequest,
     ReviewDecisionResponse,
     TaskRunListItem,
@@ -21,7 +29,7 @@ from app.models.api import (
     TemplateSummary,
 )
 from app.models.artifacts import RegistryArtifact
-from app.models.runtime import ReviewDecision
+from app.models.runtime import ControlLevel, DeterminismMode, ReasoningVisibilityTier, ReviewDecision
 from app.services.artifact_registry_service import ArtifactRegistryService
 from app.services.experiment_service import ExperimentService
 from app.services.optimization_service import OptimizationService
@@ -255,6 +263,8 @@ def submit_review(
 async def execute_task(
     prompt: str = Form(...),
     deterministic: bool = Form(True),
+    determinism_mode: DeterminismMode | None = Form(default=None),
+    control_level: ControlLevel = Form(default=ControlLevel.operational),
     auto_approve_human_review: bool = Form(True),
     use_sample_data: bool = Form(True),
     files: list[UploadFile] = File(default=[]),
@@ -267,7 +277,105 @@ async def execute_task(
         auto_approve_human_review=auto_approve_human_review,
         use_sample_data=use_sample_data,
         files=files,
+        determinism_mode=determinism_mode,
+        control_level=control_level,
     )
+
+
+@router.post("/tasks/{task_id}/replay", response_model=TaskRunResponse)
+def replay_task(
+    task_id: str,
+    request: ReplayTaskRequest,
+    db: Session = Depends(get_db),
+) -> TaskRunResponse:
+    try:
+        return TaskService(db).replay_task(
+            task_id=task_id,
+            snapshot_label=request.snapshot_label,
+            resume_from_snapshot=request.resume_from_snapshot,
+            auto_approve_human_review=request.auto_approve_human_review,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/patch", response_model=TaskRunResponse)
+def patch_task(
+    task_id: str,
+    request: GraphPatchRequest,
+    db: Session = Depends(get_db),
+) -> TaskRunResponse:
+    try:
+        return TaskService(db).apply_graph_patch(
+            task_id=task_id,
+            patch_type=request.patch_type,
+            target_node_id=request.target_node_id,
+            change_reason=request.change_reason,
+            requested_by=request.requested_by,
+            approved_by=request.approved_by,
+            payload=request.payload,
+            auto_rerun=request.auto_rerun,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/plan-change", response_model=PlanChangeResponse)
+def plan_change(
+    task_id: str,
+    request: PlanChangeRequest,
+    db: Session = Depends(get_db),
+) -> PlanChangeResponse:
+    try:
+        return TaskService(db).plan_change(
+            task_id=task_id,
+            request_text=request.request_text,
+            requested_by=request.requested_by,
+            selected_node_id=request.selected_node_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/apply-planned-change", response_model=TaskRunResponse)
+def apply_planned_change(
+    task_id: str,
+    request: ApplyPlannedChangeRequest,
+    db: Session = Depends(get_db),
+) -> TaskRunResponse:
+    try:
+        return TaskService(db).apply_planned_change(
+            task_id=task_id,
+            proposal_id=request.proposal_id,
+            approved_by=request.approved_by,
+            approval_notes=request.approval_notes,
+            auto_rerun=request.auto_rerun,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tasks/diff", response_model=RunDiffResponse)
+def diff_runs(
+    request: RunDiffRequest,
+    db: Session = Depends(get_db),
+) -> RunDiffResponse:
+    try:
+        return TaskService(db).diff_runs(request.left_task_id, request.right_task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/tasks/{task_id}/trace", response_model=ReasoningTraceResponse)
+def get_trace(
+    task_id: str,
+    tier: ReasoningVisibilityTier = ReasoningVisibilityTier.summary_trace,
+    db: Session = Depends(get_db),
+) -> ReasoningTraceResponse:
+    try:
+        return TaskService(db).get_reasoning_trace(task_id, tier)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/experiments", response_model=list[ExperimentRunResponse])

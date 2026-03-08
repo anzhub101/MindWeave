@@ -43,6 +43,8 @@ class OptimizationService:
                             name=f"{request.name}:{policy}:{profile.name or 'default'}",
                             prompts=request.prompts,
                             deterministic=request.deterministic,
+                            determinism_mode=request.determinism_mode,
+                            control_level=request.control_level,
                             use_sample_data=request.use_sample_data,
                             auto_approve_human_review=request.auto_approve_human_review,
                         ),
@@ -91,6 +93,8 @@ class OptimizationService:
             promoted_version=promoted_version,
             payload={
                 "deterministic": request.deterministic,
+                "determinism_mode": request.determinism_mode.value if request.determinism_mode is not None else None,
+                "control_level": request.control_level.value,
                 "use_sample_data": request.use_sample_data,
                 "auto_approve_human_review": request.auto_approve_human_review,
             },

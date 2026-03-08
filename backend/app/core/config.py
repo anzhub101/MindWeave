@@ -26,7 +26,15 @@ class Settings(BaseSettings):
     deterministic_temperature: float = 0.0
     k2_reasoning_effort: str = "high"
     k2_top_p: float = 1.0
-    deterministic_seed: int = 7
+    deterministic_seed: int = 42
+    strict_local_model_id: str = "mindweave-local-deterministic"
+    strict_local_model_version: str = "dev"
+    strict_inference_engine_version: str = "mock-engine-1.0"
+    strict_cuda_stack: str = "cpu"
+    strict_instance_type: str = "local-dev"
+    strict_disable_dynamic_batching: bool = True
+    strict_parallelism: int = 1
+    strict_local_endpoint: str = "local://mindweave-strict"
     vector_backend: str = "local"
     pinecone_api_key: str | None = None
     pinecone_index_name: str = "mindweave-knowledge"

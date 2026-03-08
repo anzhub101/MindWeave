@@ -19,6 +19,30 @@ class AuditStore:
         result = self.storage_service.store_json("snapshots", relative_path, payload)
         return result.local_path
 
+    def list_snapshots(self, task_id: str) -> list[Path]:
+        snapshot_dir = self.storage_root / "snapshots" / task_id
+        if not snapshot_dir.exists():
+            return []
+        return sorted(snapshot_dir.glob("*.json"))
+
+    def load_snapshot(self, task_id: str, label: str | None = None) -> tuple[GraphReasoningState, str]:
+        candidates = self.list_snapshots(task_id)
+        if not candidates:
+            raise ValueError(f"No snapshots found for task {task_id}.")
+        if label is None:
+            path = candidates[-1]
+        else:
+            matched = [
+                candidate
+                for candidate in candidates
+                if candidate.name.endswith(f"_{label}.json") or candidate.stem == label
+            ]
+            if not matched:
+                raise ValueError(f"Snapshot {label} not found for task {task_id}.")
+            path = matched[-1]
+        payload = path.read_text(encoding="utf-8")
+        return GraphReasoningState.model_validate_json(payload), path.stem
+
     def build_audit_package(self, state: GraphReasoningState) -> dict:
         return {
             "task_id": state.task_id,
@@ -35,6 +59,9 @@ class AuditStore:
             "evaluation_logs": [entry.model_dump(mode="json") for entry in state.evaluation_logs],
             "schema_validation_logs": [entry.model_dump(mode="json") for entry in state.schema_validation_logs],
             "event_log": [entry.model_dump(mode="json") for entry in state.logs],
+            "change_intents": [entry.model_dump(mode="json") for entry in state.change_intents],
+            "patch_proposals": [entry.model_dump(mode="json") for entry in state.patch_proposals],
+            "patch_validation_history": [entry.model_dump(mode="json") for entry in state.patch_validation_history],
         }
 
     def persist_audit_package(self, state: GraphReasoningState) -> tuple[dict, Path]:

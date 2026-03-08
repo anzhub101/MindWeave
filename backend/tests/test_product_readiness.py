@@ -136,6 +136,8 @@ def test_optimization_service_selects_and_promotes_best_candidate(tmp_path) -> N
         auto_approve_human_review: bool,
         use_sample_data: bool,
         files: list,
+        determinism_mode=None,
+        control_level=None,
         execution_overrides=None,
     ):
         policy = (execution_overrides or {}).get("policy", "priority_based")

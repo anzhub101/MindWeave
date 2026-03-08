@@ -1,7 +1,25 @@
-import type { TaskRunListItem, TaskRunResponse } from "./types";
+import type { EvidenceReference, TaskRunListItem, TaskRunResponse } from "./types";
 
 const basePrompt =
   "Perform a financial audit for Invisium FY2026 using the uploaded financial statements and supporting evidence.";
+
+function demoEvidence(documentId: string): EvidenceReference {
+  return {
+    id: `${documentId}_chunk_0`,
+    document_id: documentId,
+    document_name: documentId,
+    chunk_id: `${documentId}_chunk_0`,
+    page: null,
+    char_start: 0,
+    char_end: 120,
+    retrieval_score: 0.91,
+    support_level: "direct",
+    citation_mode: "direct",
+    source_type: "retrieved",
+    text_excerpt: "",
+    metadata: {},
+  };
+}
 
 export const mockTask: TaskRunResponse = {
   task_id: "demo-task",
@@ -52,7 +70,7 @@ export const mockTask: TaskRunResponse = {
       depends_on: [],
       guarded_by: [],
       next_nodes: ["financial_data_analysis"],
-      evidence_refs: ["doc_charter"],
+      evidence_refs: [demoEvidence("doc_charter")],
       inputs: {},
       output: {
         company_name: "Invisium",
@@ -75,7 +93,7 @@ export const mockTask: TaskRunResponse = {
       depends_on: ["audit_scope"],
       guarded_by: [],
       next_nodes: ["compliance_check", "integrity_check"],
-      evidence_refs: ["doc_charter", "doc_controls"],
+      evidence_refs: [demoEvidence("doc_charter"), demoEvidence("doc_controls")],
       inputs: {},
       output: {
         key_metrics: {
@@ -101,7 +119,7 @@ export const mockTask: TaskRunResponse = {
       depends_on: ["financial_data_analysis"],
       guarded_by: [],
       next_nodes: ["risk_assessment"],
-      evidence_refs: ["doc_controls"],
+      evidence_refs: [demoEvidence("doc_controls")],
       inputs: {},
       output: {
         conclusion: "Verification completed with exceptions logged.",
@@ -123,7 +141,7 @@ export const mockTask: TaskRunResponse = {
       depends_on: ["financial_data_analysis"],
       guarded_by: [],
       next_nodes: ["risk_assessment"],
-      evidence_refs: ["doc_controls"],
+      evidence_refs: [demoEvidence("doc_controls")],
       inputs: {},
       output: {
         conclusion: "Integrity checks completed.",
@@ -145,7 +163,7 @@ export const mockTask: TaskRunResponse = {
       depends_on: ["compliance_check", "integrity_check"],
       guarded_by: ["compliance_check", "integrity_check"],
       next_nodes: ["human_review"],
-      evidence_refs: ["doc_controls"],
+      evidence_refs: [demoEvidence("doc_controls")],
       inputs: {},
       output: {
         identified_risks: [
@@ -170,7 +188,7 @@ export const mockTask: TaskRunResponse = {
       depends_on: ["risk_assessment"],
       guarded_by: [],
       next_nodes: ["final_report_synthesis"],
-      evidence_refs: ["doc_controls"],
+      evidence_refs: [demoEvidence("doc_controls")],
       inputs: {},
       output: {
         review_mode: "simulated_auto_approval",
@@ -192,7 +210,7 @@ export const mockTask: TaskRunResponse = {
       depends_on: ["human_review"],
       guarded_by: ["human_review"],
       next_nodes: [],
-      evidence_refs: ["doc_charter", "doc_controls"],
+      evidence_refs: [demoEvidence("doc_charter"), demoEvidence("doc_controls")],
       inputs: {},
       output: {
         audit_opinion: "Qualified",

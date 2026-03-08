@@ -83,10 +83,10 @@ class DocumentProcessor:
                 reader = PdfReader(io.BytesIO(raw))
                 pages = [page.extract_text() or "" for page in reader.pages]
                 text = "\n\n".join(pages).strip()
-                metadata = {"page_count": len(pages), "ocr_used": False}
+                metadata = {"page_count": len(pages), "page_texts": pages, "ocr_used": False}
             except Exception as exc:
                 text = ""
-                metadata = {"page_count": 0, "ocr_used": False, "parser_error": str(exc)}
+                metadata = {"page_count": 0, "page_texts": [], "ocr_used": False, "parser_error": str(exc)}
             if self._should_fallback_to_ocr(text):
                 ocr_text, ocr_metadata = self.ocr_service.extract_text(raw, filename)
                 if ocr_text.strip():

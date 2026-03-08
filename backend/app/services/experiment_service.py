@@ -28,6 +28,8 @@ class ExperimentService:
             result = await task_runner(
                 prompt=prompt,
                 deterministic=request.deterministic,
+                determinism_mode=request.determinism_mode,
+                control_level=request.control_level,
                 auto_approve_human_review=request.auto_approve_human_review,
                 use_sample_data=request.use_sample_data,
                 files=[],
@@ -55,6 +57,8 @@ class ExperimentService:
             tokens_used=tokens_used,
             payload={
                 "deterministic": request.deterministic,
+                "determinism_mode": request.determinism_mode.value if request.determinism_mode is not None else None,
+                "control_level": request.control_level.value,
                 "use_sample_data": request.use_sample_data,
             },
         )

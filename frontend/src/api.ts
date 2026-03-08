@@ -1,4 +1,4 @@
-import type { TaskRunListItem, TaskRunResponse } from "./types";
+import type { PlanChangeResponse, TaskRunListItem, TaskRunResponse } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
 
@@ -55,6 +55,42 @@ export async function submitReview(
       reviewer,
       decision,
       comments,
+    }),
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function planTaskChange(
+  taskId: string,
+  requestText: string,
+  requestedBy: string,
+  selectedNodeId: string | null,
+): Promise<PlanChangeResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/plan-change`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      request_text: requestText,
+      requested_by: requestedBy,
+      selected_node_id: selectedNodeId,
+    }),
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function applyPlannedChange(
+  taskId: string,
+  proposalId: string,
+  approvedBy: string,
+  autoRerun: boolean,
+): Promise<TaskRunResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/apply-planned-change`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      proposal_id: proposalId,
+      approved_by: approvedBy || null,
+      auto_rerun: autoRerun,
     }),
   });
   return ensureOk(response).then((result) => result.json());

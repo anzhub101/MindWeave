@@ -4,12 +4,15 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from app.core.config import get_settings
 from app.models.artifacts import NodeSpec, ReasoningProgram, SynthesizedProgramBundle
+from app.models.runtime import PromptTrace
 from app.services.json_utils import extract_json_object
 from app.services.llm_gateway import LLMGateway, LLMRequest, MockProvider
 from app.services.requirements_reference import RequirementsReference
+from app.services.runtime_metadata import trace_from_request_response
 from app.services.schema_service import SchemaService
 
 
@@ -20,9 +23,17 @@ class ProgramSynthesisService:
         self.reference = RequirementsReference(self.settings.requirements_markdown_path)
         self.generated_root = self.settings.generated_artifact_root
         self.schema_service = SchemaService()
+        self.last_prompt_trace: PromptTrace | None = None
+        self.last_provider_metadata: dict[str, Any] = {}
 
-    def synthesize(self, user_prompt: str, deterministic: bool = False) -> SynthesizedProgramBundle:
+    def synthesize(
+        self,
+        user_prompt: str,
+        deterministic: bool = False,
+        determinism_mode: str | None = None,
+    ) -> SynthesizedProgramBundle:
         requirements_text = self.reference.read()
+        determinism_mode = determinism_mode or ("best_effort_deterministic" if deterministic else "non_deterministic")
         system_prompt = (
             "You are MindWeave's design-plane synthesizer. "
             "Create a domain-agnostic reasoning program for the given task using the supplied "
@@ -49,9 +60,47 @@ class ProgramSynthesisService:
             "- The final schema should be suitable for structured output and audit export.\n"
             "- Return strict JSON, no commentary.\n"
         )
-        if deterministic:
+        if deterministic and determinism_mode == "strict_deterministic":
             bundle = self._normalize_bundle(self._fallback_payload(user_prompt, requirements_text), user_prompt)
             bundle = self.schema_service.attach_generated_node_schemas(bundle)
+            provider_metadata = self.llm_gateway.describe_provider(determinism_mode)
+            self.last_provider_metadata = provider_metadata
+            self.last_prompt_trace = trace_from_request_response(
+                trace_id=f"synthesis:{uuid4().hex[:8]}",
+                phase="program_synthesis",
+                node_id=None,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                context={
+                    "user_prompt": user_prompt,
+                    "requirements_reference_markdown": requirements_text,
+                },
+                params={
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "seed": self.settings.deterministic_seed,
+                    "determinism_mode": determinism_mode,
+                },
+                provider=provider_metadata["provider"],
+                model_id=provider_metadata["model_id"],
+                model_version=provider_metadata["model_version"],
+                provider_fingerprint=provider_metadata["provider_fingerprint"],
+                endpoint=provider_metadata.get("endpoint"),
+                request_payload={
+                    "model": provider_metadata["model_id"],
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "context": {
+                        "user_prompt": user_prompt,
+                        "requirements_reference_markdown": requirements_text,
+                    },
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "seed": self.settings.deterministic_seed,
+                    "determinism_mode": determinism_mode,
+                },
+                response_payload={"bundle_source": "strict_local_fallback"},
+            )
             self._persist_bundle(bundle)
             return bundle
 
@@ -65,10 +114,38 @@ class ProgramSynthesisService:
                     "requirements_reference_markdown": requirements_text,
                 },
                 temperature=self.settings.k2_temperature,
+                top_p=self.settings.k2_top_p,
                 seed=self.settings.deterministic_seed,
+                determinism_mode=determinism_mode,
                 agentic=True,
                 max_tokens=3500,
             )
+        )
+        self.last_provider_metadata = {
+            "provider": response.provider,
+            "model_id": response.model,
+            "model_version": response.model_version or response.model,
+            "provider_fingerprint": response.provider_fingerprint,
+            "endpoint": response.endpoint,
+        }
+        self.last_prompt_trace = trace_from_request_response(
+            trace_id=f"synthesis:{uuid4().hex[:8]}",
+            phase="program_synthesis",
+            node_id=None,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            context={
+                "user_prompt": user_prompt,
+                "requirements_reference_markdown": requirements_text,
+            },
+            params=response.request_params,
+            provider=response.provider,
+            model_id=response.model,
+            model_version=response.model_version or response.model,
+            provider_fingerprint=response.provider_fingerprint,
+            endpoint=response.endpoint,
+            request_payload=response.request_payload,
+            response_payload=response.raw,
         )
 
         try:
@@ -94,7 +171,9 @@ class ProgramSynthesisService:
                     ),
                     context={"raw_text": content},
                     temperature=self.settings.k2_temperature,
+                    top_p=self.settings.k2_top_p,
                     seed=self.settings.deterministic_seed,
+                    determinism_mode="best_effort_deterministic",
                     agentic=False,
                     max_tokens=3500,
                 )
@@ -242,6 +321,20 @@ class ProgramSynthesisService:
                 "objective": {"type": "string"},
                 "conclusion": {"type": "string"},
                 "findings": {"type": "array", "items": {"type": "string"}},
+                "finding_records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "text", "support_level", "evidence_refs"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "text": {"type": "string"},
+                            "support_level": {"type": "string"},
+                            "evidence_refs": {"type": "array", "items": {"type": "object"}},
+                        },
+                        "additionalProperties": True,
+                    },
+                },
                 "evidence_sources": {"type": "array", "items": {"type": "string"}},
                 "next_steps": {"type": "array", "items": {"type": "string"}},
             },
@@ -351,6 +444,11 @@ class ProgramSynthesisService:
                     "input_schema_id": str(raw_node.get("input_schema_id")) if raw_node.get("input_schema_id") else None,
                     "output_schema_id": str(raw_node.get("output_schema_id")) if raw_node.get("output_schema_id") else None,
                     "priority": self._normalize_priority(raw_node.get("priority"), index),
+                    "executor_type": self._first_string(raw_node, "executor_type") or "llm_operator",
+                    "max_child_agents": int(raw_node.get("max_child_agents", 0) or 0),
+                    "max_recursion_depth": int(raw_node.get("max_recursion_depth", 0) or 0),
+                    "expansion_contracts": self._normalize_string_list(raw_node.get("expansion_contracts")),
+                    "required_approvals": int(raw_node.get("required_approvals", 0) or 0),
                     "depends_on": self._normalize_string_list(raw_node.get("depends_on") or raw_node.get("dependencies")),
                     "next": self._normalize_string_list(raw_node.get("next") or raw_node.get("next_nodes")),
                     "guarded_by": self._normalize_string_list(raw_node.get("guarded_by")),

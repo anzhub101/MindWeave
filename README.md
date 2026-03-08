@@ -41,6 +41,8 @@ sample_data/
 docs/
   requirements-planning.md
   technical-summary.md
+  determinism-audit-and-graph-controls.md
+  runtime-operations-guide.md
 ```
 
 ## Backend Setup
@@ -224,6 +226,11 @@ MW_OPENAI_MODEL=gpt-4.1-mini
 
 The provider abstraction lives in [backend/app/services/llm_gateway.py](/Users/manzeem/MindWeave/backend/app/services/llm_gateway.py).
 
+## Runtime Control Docs
+
+- Determinism, audit, and graph controls: [docs/determinism-audit-and-graph-controls.md](/Users/manzeem/MindWeave/docs/determinism-audit-and-graph-controls.md)
+- Runtime operations guide: [docs/runtime-operations-guide.md](/Users/manzeem/MindWeave/docs/runtime-operations-guide.md)
+
 ## Verification and Auditability
 
 - Every node execution produces a log entry.
@@ -255,3 +262,5 @@ The current tests cover verify-gate enforcement, product-readiness features, and
 - Pinecone smoke test: [backend/scripts/pinecone_smoke_test.py](/Users/manzeem/MindWeave/backend/scripts/pinecone_smoke_test.py)
 - Frontend dashboard: [frontend/src/App.tsx](/Users/manzeem/MindWeave/frontend/src/App.tsx)
 - Technical mapping: [docs/technical-summary.md](/Users/manzeem/MindWeave/docs/technical-summary.md)
+- Determinism and graph controls: [docs/determinism-audit-and-graph-controls.md](/Users/manzeem/MindWeave/docs/determinism-audit-and-graph-controls.md)
+- Runtime operations guide: [docs/runtime-operations-guide.md](/Users/manzeem/MindWeave/docs/runtime-operations-guide.md)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -21,7 +23,11 @@ class LLMRequest(BaseModel):
     system_prompt: str | None = None
     messages: list[LLMMessage] = Field(default_factory=list)
     temperature: float | None = None
+    top_p: float | None = None
     seed: int | None = None
+    determinism_mode: str | None = None
+    model_id: str | None = None
+    model_version: str | None = None
     agentic: bool = True
     max_tokens: int | None = None
 
@@ -29,9 +35,15 @@ class LLMRequest(BaseModel):
 class LLMResponse(BaseModel):
     provider: str
     model: str
+    model_version: str = ""
     content: str
     prompt_tokens: int
     completion_tokens: int
+    provider_fingerprint: str = ""
+    endpoint: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    request_params: dict[str, Any] = Field(default_factory=dict)
+    request_payload: dict[str, Any] = Field(default_factory=dict)
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -39,16 +51,55 @@ class MockProvider:
     provider_name = "mock"
     model_name = "deterministic-template"
 
+    def __init__(
+        self,
+        provider_name: str | None = None,
+        model_name: str | None = None,
+        model_version: str = "1.0.0",
+        endpoint: str = "local://mock",
+        fingerprint: str | None = None,
+    ) -> None:
+        self.provider_name = provider_name or self.provider_name
+        self.model_name = model_name or self.model_name
+        self.model_version = model_version
+        self.endpoint = endpoint
+        self.fingerprint = fingerprint or self._default_fingerprint()
+
+    def _default_fingerprint(self) -> str:
+        return hashlib.sha256(f"{self.provider_name}:{self.model_name}:{self.model_version}".encode("utf-8")).hexdigest()[:16]
+
     def generate(self, request: LLMRequest) -> LLMResponse:
         content = self._complete(request)
         prompt_tokens = max(1, len(request.prompt.split()))
         completion_tokens = max(1, len(content.split()))
+        request_payload = {
+            "model": request.model_id or self.model_name,
+            "prompt": request.prompt,
+            "system_prompt": request.system_prompt,
+            "context": request.context,
+            "messages": [message.model_dump() for message in request.messages],
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+            "seed": request.seed,
+            "determinism_mode": request.determinism_mode,
+            "max_tokens": request.max_tokens,
+        }
         return LLMResponse(
             provider=self.provider_name,
             model=self.model_name,
+            model_version=self.model_version,
             content=content,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            provider_fingerprint=self.fingerprint,
+            endpoint=self.endpoint,
+            request_params={
+                "temperature": request.temperature,
+                "top_p": request.top_p,
+                "seed": request.seed,
+                "determinism_mode": request.determinism_mode,
+            },
+            request_payload=request_payload,
             raw={"task": request.task},
         )
 
@@ -84,7 +135,10 @@ class MockProvider:
                         },
                         "convergence_rule": "no_pending_nodes",
                         "output_schema": f"{program_id}_output_schema_v1",
-                        "deterministic_defaults": {"temperature": 0, "seed": 7},
+                        "deterministic_defaults": {
+                            "temperature": 0,
+                            "seed": request.seed if request.seed is not None else 42,
+                        },
                         "metadata": {
                             "summary_guidance": {
                                 "headline": "Primary conclusion",
@@ -189,6 +243,10 @@ class MockProvider:
                                 "type": "array",
                                 "items": {"type": "string"},
                             },
+                            "finding_records": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
                             "evidence_sources": {
                                 "type": "array",
                                 "items": {"type": "string"},
@@ -222,10 +280,32 @@ class MockProvider:
                     "Dependencies were structurally valid.",
                 ]
             if request.context.get("is_final_node"):
+                direct_evidence = [
+                    {
+                        "document_id": evidence_id,
+                        "document_name": evidence_id,
+                        "chunk_id": evidence_id,
+                    }
+                    for evidence_id in request.context.get("available_evidence_ids", [])[:1]
+                ]
                 payload["final_output"] = {
                     "objective": request.context.get("user_prompt", ""),
                     "conclusion": "Deterministic mock synthesis completed successfully.",
                     "findings": ["Mock finding one", "Mock finding two"],
+                    "finding_records": [
+                        {
+                            "id": "finding_1",
+                            "text": "Mock finding one",
+                            "support_level": "direct" if direct_evidence else "unsupported",
+                            "evidence_refs": direct_evidence,
+                        },
+                        {
+                            "id": "finding_2",
+                            "text": "Mock finding two",
+                            "support_level": "inferred",
+                            "evidence_refs": [],
+                        },
+                    ],
                     "evidence_sources": request.context.get("available_evidence_ids", [])[:3],
                     "next_steps": ["Review exported audit package."],
                 }
@@ -268,20 +348,35 @@ class OpenAIProvider:
         else:
             messages.append({"role": "user", "content": user_text})
 
-        response = self.client.responses.create(
-            model=self.model_name,
-            temperature=request.temperature if request.temperature is not None else 0.0,
-            input=messages,
-        )
+        params: dict[str, Any] = {
+            "model": request.model_id or self.model_name,
+            "temperature": request.temperature if request.temperature is not None else 0.0,
+            "input": messages,
+        }
+        if request.top_p is not None:
+            params["top_p"] = request.top_p
+        response = self.client.responses.create(**params)
         content = response.output_text
         usage = response.usage
+        raw = response.model_dump(mode="json")
+        provider_fingerprint = str(raw.get("system_fingerprint") or self.model_name)
         return LLMResponse(
             provider=self.provider_name,
-            model=self.model_name,
+            model=request.model_id or self.model_name,
+            model_version=request.model_version or request.model_id or self.model_name,
             content=content,
             prompt_tokens=usage.input_tokens,
             completion_tokens=usage.output_tokens,
-            raw=response.model_dump(mode="json"),
+            provider_fingerprint=provider_fingerprint,
+            endpoint="openai://responses",
+            request_params={
+                "temperature": request.temperature,
+                "top_p": request.top_p,
+                "seed": request.seed,
+                "determinism_mode": request.determinism_mode,
+            },
+            request_payload=params,
+            raw=raw,
         )
 
 
@@ -310,15 +405,17 @@ class K2Provider:
         messages = self._build_messages(request)
         temperature = request.temperature if request.temperature is not None else self.temperature
         payload: dict[str, Any] = {
-            "model": self.model_name,
+            "model": request.model_id or self.model_name,
             "messages": messages,
             "stream": False,
             "temperature": temperature,
-            "top_p": self.top_p,
+            "top_p": request.top_p if request.top_p is not None else self.top_p,
             "chat_template_kwargs": {"reasoning_effort": self.reasoning_effort},
         }
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
+        if request.seed is not None:
+            payload["seed"] = request.seed
 
         url = self.chat_url
         response = httpx.post(
@@ -339,10 +436,20 @@ class K2Provider:
         usage = data.get("usage", {})
         return LLMResponse(
             provider=self.provider_name,
-            model=self.model_name,
+            model=request.model_id or self.model_name,
+            model_version=request.model_version or request.model_id or self.model_name,
             content=content,
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
+            provider_fingerprint=str(data.get("system_fingerprint") or hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]),
+            endpoint=url,
+            request_params={
+                "temperature": temperature,
+                "top_p": payload["top_p"],
+                "seed": request.seed,
+                "determinism_mode": request.determinism_mode,
+            },
+            request_payload=payload,
             raw=data,
         )
 
@@ -363,7 +470,8 @@ class K2Provider:
 
 class LLMGateway:
     def __init__(self) -> None:
-        settings = get_settings()
+        self.settings = get_settings()
+        settings = self.settings
         if settings.llm_provider == "k2" and settings.k2_api_key:
             self.provider = K2Provider(
                 api_key=settings.k2_api_key,
@@ -378,6 +486,64 @@ class LLMGateway:
             self.provider = OpenAIProvider(settings.openai_api_key, settings.openai_model)
         else:
             self.provider = MockProvider()
+        self.strict_provider = MockProvider(
+            provider_name="local",
+            model_name=settings.strict_local_model_id,
+            model_version=settings.strict_local_model_version,
+            endpoint=settings.strict_local_endpoint,
+        )
 
     def generate(self, request: LLMRequest) -> LLMResponse:
-        return self.provider.generate(request)
+        provider = self._provider_for(request)
+        prepared_request = self._prepare_request(request, provider)
+        return provider.generate(prepared_request)
+
+    def describe_provider(self, determinism_mode: str | None = None) -> dict[str, Any]:
+        provider = self.strict_provider if determinism_mode == "strict_deterministic" else self.provider
+        if isinstance(provider, MockProvider):
+            return {
+                "provider": provider.provider_name,
+                "model_id": provider.model_name,
+                "model_version": provider.model_version,
+                "provider_fingerprint": provider.fingerprint,
+                "endpoint": provider.endpoint,
+            }
+        if isinstance(provider, OpenAIProvider):
+            return {
+                "provider": provider.provider_name,
+                "model_id": provider.model_name,
+                "model_version": provider.model_name,
+                "provider_fingerprint": provider.model_name,
+                "endpoint": "openai://responses",
+            }
+        return {
+            "provider": provider.provider_name,
+            "model_id": provider.model_name,
+            "model_version": provider.model_name,
+            "provider_fingerprint": hashlib.sha256(provider.chat_url.encode("utf-8")).hexdigest()[:16],
+            "endpoint": provider.chat_url,
+        }
+
+    def _provider_for(self, request: LLMRequest):
+        if request.determinism_mode == "strict_deterministic":
+            return self.strict_provider
+        return self.provider
+
+    def _prepare_request(self, request: LLMRequest, provider) -> LLMRequest:
+        payload = request.model_dump()
+        mode = request.determinism_mode or "non_deterministic"
+        if mode in {"best_effort_deterministic", "strict_deterministic"}:
+            payload["temperature"] = 0.0
+            payload["top_p"] = 1.0
+            payload["seed"] = request.seed if request.seed is not None else self.settings.deterministic_seed
+        if mode == "strict_deterministic":
+            payload["model_id"] = self.settings.strict_local_model_id
+            payload["model_version"] = self.settings.strict_local_model_version
+        elif request.model_id is None:
+            if isinstance(provider, MockProvider):
+                payload["model_id"] = provider.model_name
+                payload["model_version"] = provider.model_version
+            else:
+                payload["model_id"] = getattr(provider, "model_name", self.settings.k2_model)
+                payload["model_version"] = getattr(provider, "model_name", self.settings.k2_model)
+        return LLMRequest.model_validate(payload)

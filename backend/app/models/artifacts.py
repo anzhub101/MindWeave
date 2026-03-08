@@ -29,6 +29,11 @@ class NodeSpec(BaseModel):
     input_schema_id: str | None = None
     output_schema_id: str | None = None
     priority: int = 100
+    executor_type: str = "llm_operator"
+    max_child_agents: int = 0
+    max_recursion_depth: int = 0
+    expansion_contracts: list[str] = Field(default_factory=list)
+    required_approvals: int = 0
     depends_on: list[str] = Field(default_factory=list)
     next_nodes: list[str] = Field(default_factory=list, alias="next")
     guarded_by: list[str] = Field(default_factory=list)

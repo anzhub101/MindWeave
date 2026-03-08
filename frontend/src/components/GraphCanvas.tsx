@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -21,7 +22,7 @@ import type { GraphEdge, GraphNode } from "../types";
 
 const CANVAS_WIDTH = 1280;
 const CARD_WIDTH = 188;
-const CARD_HEIGHT = 96;
+const CARD_HEIGHT = 132;
 const TOP_OFFSET = 44;
 const ROW_GAP = 170;
 const COLUMN_X: Record<number, number> = {
@@ -48,7 +49,7 @@ type DragState = {
 function defaultNodePosition(node: GraphNode): Point {
   const layout = node.metadata.layout ?? { column: 1, row: 0 };
   return {
-    x: (COLUMN_X[layout.column] ?? COLUMN_X[1]) + CARD_WIDTH / 2,
+    x: COLUMN_X[layout.column] ?? COLUMN_X[1],
     y: TOP_OFFSET + layout.row * ROW_GAP,
   };
 }
@@ -90,7 +91,7 @@ function statusTone(node: GraphNode, active: boolean) {
   if (active) {
     return "border-[var(--mw-border-strong)] bg-[var(--mw-panel)]";
   }
-  return "border-transparent bg-transparent";
+  return "border-[var(--mw-border)] bg-[var(--mw-panel)]";
 }
 
 interface GraphCanvasProps {
@@ -113,6 +114,7 @@ export function GraphCanvas({
   const [isPanning, setIsPanning] = useState(false);
   const [nodePositions, setNodePositions] = useState<Record<string, Point>>({});
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const zoomRef = useRef(zoom);
   const panRef = useRef<DragState>({
     active: false,
     startX: 0,
@@ -139,8 +141,43 @@ export function GraphCanvas({
     );
   }, [nodes]);
 
-  const innerHeight =
-    Math.max(...nodes.map((node) => (node.metadata.layout?.row ?? 0) + 1), 5) * ROW_GAP + 96;
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  // 1. Calculate the standard minimum height based on your layout rows
+  const baseHeight = Math.max(...nodes.map((node) => (node.metadata.layout?.row ?? 0) + 1), 5) * ROW_GAP + 96;
+
+  // 2. Find the lowest 'y' value currently in state (fallback to 0 if state is empty on first render)
+  const currentMaxY = Object.values(nodePositions).length > 0 
+    ? Math.max(...Object.values(nodePositions).map(p => p.y)) 
+    : 0;
+
+  // 3. The canvas height is whichever is larger: the base height, or the lowest node + padding
+  const innerHeight = Math.max(baseHeight, currentMaxY + CARD_HEIGHT + 120);
+
+  const centerView = useCallback((currentZoom = zoomRef.current) => {
+    if (!canvasRef.current) {
+      return;
+    }
+
+    const { clientWidth, clientHeight } = canvasRef.current;
+    const targetX = (clientWidth - CANVAS_WIDTH * currentZoom) / 2;
+    const targetY =
+      innerHeight * currentZoom < clientHeight
+        ? (clientHeight - innerHeight * currentZoom) / 2
+        : 48;
+
+    setPan({ x: targetX, y: targetY });
+  }, [innerHeight]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      centerView();
+    }, 10);
+
+    return () => window.clearTimeout(timer);
+  }, [nodes.length, centerView]);
 
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
 
@@ -154,9 +191,9 @@ export function GraphCanvas({
     const flowsDownward = targetPosition.y >= sourcePosition.y;
 
     return {
-      startX: sourcePosition.x,
+      startX: sourcePosition.x + CARD_WIDTH / 2,
       startY: flowsDownward ? sourcePosition.y + CARD_HEIGHT : sourcePosition.y,
-      endX: targetPosition.x,
+      endX: targetPosition.x + CARD_WIDTH / 2,
       endY: flowsDownward ? targetPosition.y : targetPosition.y + CARD_HEIGHT,
     };
   }
@@ -176,11 +213,11 @@ export function GraphCanvas({
   }
 
   function applyZoom(nextZoom: number) {
-    setZoom(clamp(Number(nextZoom.toFixed(2)), 0.6, 2.2));
+    setZoom(clamp(Number(nextZoom.toFixed(2)), 0.4, 2.2));
   }
 
   function zoomAroundPoint(nextZoom: number, viewportX: number, viewportY: number) {
-    const clamped = clamp(Number(nextZoom.toFixed(2)), 0.6, 2.2);
+    const clamped = clamp(Number(nextZoom.toFixed(2)), 0.4, 2.2);
     const ratio = clamped / zoom;
     setPan({
       x: viewportX - (viewportX - pan.x) * ratio,
@@ -213,11 +250,14 @@ export function GraphCanvas({
       if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) {
         nodeDragRef.current.moved = true;
       }
+      // Inside handleCanvasPointerMove (around line 133)
       setNodePositions((current) => ({
         ...current,
         [nodeDragRef.current.nodeId as string]: {
-          x: clamp(nodeDragRef.current.originX + deltaX, CARD_WIDTH / 2 + 24, CANVAS_WIDTH - CARD_WIDTH / 2 - 24),
-          y: clamp(nodeDragRef.current.originY + deltaY, 24, innerHeight - CARD_HEIGHT - 24),
+          // Keep the horizontal clamp
+          x: clamp(nodeDragRef.current.originX + deltaX, 24, CANVAS_WIDTH - CARD_WIDTH - 24),
+          // Remove the bottom limit, only enforce the top 24px margin
+          y: Math.max(24, nodeDragRef.current.originY + deltaY), 
         },
       }));
       return;
@@ -327,9 +367,9 @@ export function GraphCanvas({
             <button
               type="button"
               onClick={() => {
-                setPan({ x: 0, y: 0 });
                 setZoom(1);
                 setNodePositions(Object.fromEntries(nodes.map((node) => [node.id, defaultNodePosition(node)])));
+                centerView(1);
               }}
               className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--mw-muted)] transition hover:bg-[var(--mw-panel)] hover:text-[var(--mw-text)]"
               aria-label="Reset graph view"
@@ -338,12 +378,6 @@ export function GraphCanvas({
             </button>
           </div>
         </div>
-
-        <div className="pointer-events-none absolute right-4 top-16 z-10 flex items-center gap-2 rounded-full border border-[var(--mw-border)] bg-[var(--mw-surface)] px-3 py-1.5 text-[10px] uppercase tracking-[0.2em] text-[var(--mw-subtle)] backdrop-blur">
-          <Move size={12} strokeWidth={1.8} />
-          Scroll to zoom, drag nodes or canvas
-        </div>
-
         <div
           className="pointer-events-none relative h-full w-full"
           style={{
@@ -400,16 +434,17 @@ export function GraphCanvas({
                   initial={{ opacity: 0, scale: 0.98, y: 8 }}
                   animate={{ opacity: 1, scale: 1, y: 0 }}
                   transition={{ delay: index * 0.05, duration: 0.32 }}
-                  className={`pointer-events-auto absolute -translate-x-1/2 rounded-[20px] border px-3.5 py-3 text-left transition ${statusTone(node, active)} ${
-                    node.status === "running" ? "animate-pulse" : ""
-                  }`}
-                  style={{
-                    width: CARD_WIDTH,
-                    height: CARD_HEIGHT,
-                    left: position.x,
-                    top: position.y,
-                  }}
-                >
+                className={`pointer-events-auto absolute rounded-[20px] border px-3.5 py-3 text-left transition ${statusTone(node, active)} ${
+                  node.status === "running" ? "animate-pulse" : ""
+                }`}
+                style={{
+                  width: CARD_WIDTH,
+                  height: CARD_HEIGHT,
+                  left: position.x,
+                  top: position.y,
+                }}
+              >
+                <div className="flex h-full flex-col">
                   <div className="mb-3 flex items-center justify-between">
                     <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-[var(--mw-muted)]">
                       <Sparkles size={12} strokeWidth={1.7} />
@@ -429,7 +464,7 @@ export function GraphCanvas({
                   </div>
                   <div className="mt-1.5 text-[12px] leading-5 text-[var(--mw-muted)]">{node.subtitle}</div>
 
-                  <div className="mt-4 flex items-center justify-between border-t border-[var(--mw-border)] pt-2.5 text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">
+                  <div className="mt-auto flex items-center justify-between border-t border-[var(--mw-border)] pt-2.5 text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">
                     <span>{node.status}</span>
                     <div className="flex items-center gap-3">
                       <span>{node.latency_ms ? `${(node.latency_ms / 1000).toFixed(1)}s` : "--"}</span>
@@ -439,7 +474,8 @@ export function GraphCanvas({
                       </span>
                     </div>
                   </div>
-                </motion.button>
+                </div>
+              </motion.button>
               );
             })}
           </div>

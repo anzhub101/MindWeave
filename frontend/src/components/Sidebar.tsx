@@ -26,10 +26,12 @@ interface SidebarProps {
 }
 
 export function Sidebar({ activeItem, onSelect, theme, onToggleTheme }: SidebarProps) {
+  const logoSrc = theme === "dark" ? "/images/logo_light.png" : "/images/logo_darkpng.png";
+
   return (
     <aside className="relative flex w-[96px] flex-col border-r border-[var(--mw-border)] bg-[var(--mw-page)] px-3 py-4 text-[var(--mw-text)]">
       <div className="mb-8 flex h-16 flex-col items-center justify-center">
-        <div className="font-serif text-[19px] leading-none tracking-[0.08em] text-[var(--mw-text)]">MW</div>
+        <img src={logoSrc} alt="MindWeave" className="h-9 w-9 object-contain" />
         <div className="mt-1 text-[9px] uppercase tracking-[0.32em] text-[var(--mw-subtle)]">MindWeave</div>
       </div>
 

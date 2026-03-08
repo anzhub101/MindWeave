@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from time import perf_counter
 
 from app.models.runtime import (
+    EvidenceGraphEdge,
+    EvidenceGraphNode,
     ExecutionLogEntry,
     GraphEdge,
     GraphNodeState,
@@ -114,17 +116,20 @@ class Controller:
         return state
 
     def _execute_node(self, state: GraphReasoningState, node: GraphNodeState) -> None:
-        if node.metadata.get("requires_human_review") and not node.metadata.get("review_approved"):
+        required_approvals = max(node.required_approvals, 1 if node.metadata.get("requires_human_review") else 0)
+        approved_count = self._approved_count(state, node.id)
+        if required_approvals and approved_count < required_approvals:
             if self.auto_approve_human_review:
-                approval = ReviewDecision(
-                    node_id=node.id,
-                    reviewer="system:auto-approve",
-                    decision="approved",
-                    comments="Auto-approved according to task execution settings.",
-                )
-                state.review_history.append(approval)
+                for index in range(required_approvals - approved_count):
+                    approval = ReviewDecision(
+                        node_id=node.id,
+                        reviewer=f"system:auto-approve:{approved_count + index + 1}",
+                        decision="approved",
+                        comments="Auto-approved according to task execution settings.",
+                    )
+                    state.review_history.append(approval)
+                    self._log(state, "human_review_auto_approved", approval.comments, node.id)
                 node.metadata["review_approved"] = True
-                self._log(state, "human_review_auto_approved", approval.comments, node.id)
             else:
                 raise HumanReviewRequired(node.id)
 
@@ -164,12 +169,16 @@ class Controller:
         node.output = result.output
         node.evidence_refs = result.evidence_refs
         node.verification_status = result.verification_status
+        node.model_metadata = result.model_metadata
+        node.prompt_hash = result.prompt_trace.prompt_hash if result.prompt_trace is not None else node.prompt_hash
         node.completed_at = utcnow()
         node.latency_ms = int((node.completed_at - node.started_at).total_seconds() * 1000)
         node.status = NodeStatus.completed
         node.metadata["cache_hit"] = result.cache_hit
         if node.evaluation_ids == []:
             node.evaluation_ids = self.evaluation_service.default_ids_for(node)
+        if evaluation_logs:
+            node.evaluation_score = sum(1.0 if log.passed else 0.0 for log in evaluation_logs) / len(evaluation_logs)
 
         thought_id = f"thought_{node.id}"
         state.thoughts[thought_id] = ThoughtRecord(
@@ -180,6 +189,10 @@ class Controller:
             evidence_refs=result.evidence_refs,
             depends_on_thoughts=[f"thought_{dependency_id}" for dependency_id in node.depends_on],
         )
+        self._record_evidence_graph(state, node, thought_id, result)
+        if result.prompt_trace is not None:
+            state.prompt_traces.append(result.prompt_trace)
+        state.execution_sequence.append(node.id)
 
         if result.verification_checks or node.operation_type == "verify":
             state.verification_logs.append(
@@ -218,11 +231,11 @@ class Controller:
 
         if not result.cache_hit:
             self.budget_manager.record_tokens(state, result.llm_usage_tokens)
-        self._log(
-            state,
-            "node_completed",
-            f"Completed node {node.id}.",
-            node.id,
+            self._log(
+                state,
+                "node_completed",
+                f"Completed node {node.id}.",
+                node.id,
             {
                 **result.output,
                 "cache_hit": result.cache_hit,
@@ -230,6 +243,85 @@ class Controller:
                 "evaluation_passed": evaluation_passed,
             },
         )
+
+    @staticmethod
+    def _approved_count(state: GraphReasoningState, node_id: str) -> int:
+        return sum(
+            1
+            for review in state.review_history
+            if review.node_id == node_id and review.decision.lower() in {"approved", "approve"}
+        )
+
+    @staticmethod
+    def _record_evidence_graph(
+        state: GraphReasoningState,
+        node: GraphNodeState,
+        thought_id: str,
+        result,
+    ) -> None:
+        claim_node_id = f"claim_{node.id}"
+        state.evidence_graph_nodes[claim_node_id] = EvidenceGraphNode(
+            id=claim_node_id,
+            kind="claim",
+            label=result.thought_summary or node.subtitle,
+            metadata={"node_id": node.id, "thought_id": thought_id},
+        )
+        for evidence in result.evidence_refs:
+            evidence_node_id = f"evidence_{evidence.chunk_id}"
+            state.evidence_graph_nodes[evidence_node_id] = EvidenceGraphNode(
+                id=evidence_node_id,
+                kind="evidence",
+                label=evidence.document_name or evidence.document_id,
+                metadata=evidence.model_dump(mode="json"),
+            )
+            state.evidence_graph_edges.append(
+                EvidenceGraphEdge(
+                    source=claim_node_id,
+                    target=evidence_node_id,
+                    relation="supported_by",
+                    metadata={
+                        "citation_mode": evidence.citation_mode,
+                        "support_level": evidence.support_level.value,
+                        "retrieval_score": evidence.retrieval_score,
+                    },
+                )
+            )
+        for finding in result.finding_records:
+            finding_node_id = f"finding_{finding.id}"
+            state.evidence_graph_nodes[finding_node_id] = EvidenceGraphNode(
+                id=finding_node_id,
+                kind="finding",
+                label=finding.text,
+                metadata={"node_id": node.id, "support_level": finding.support_level.value},
+            )
+            state.evidence_graph_edges.append(
+                EvidenceGraphEdge(
+                    source=finding_node_id,
+                    target=claim_node_id,
+                    relation="derived_from",
+                    metadata={"support_level": finding.support_level.value},
+                )
+            )
+            for evidence in finding.evidence_refs:
+                evidence_node_id = f"evidence_{evidence.chunk_id}"
+                state.evidence_graph_nodes[evidence_node_id] = EvidenceGraphNode(
+                    id=evidence_node_id,
+                    kind="evidence",
+                    label=evidence.document_name or evidence.document_id,
+                    metadata=evidence.model_dump(mode="json"),
+                )
+                state.evidence_graph_edges.append(
+                    EvidenceGraphEdge(
+                        source=finding_node_id,
+                        target=evidence_node_id,
+                        relation="supported_by",
+                        metadata={
+                            "citation_mode": evidence.citation_mode,
+                            "support_level": evidence.support_level.value,
+                            "retrieval_score": evidence.retrieval_score,
+                        },
+                    )
+                )
 
     @staticmethod
     def _log(
