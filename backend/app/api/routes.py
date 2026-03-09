@@ -13,6 +13,9 @@ from app.models.api import (
     GraphPatchRequest,
     ExperimentRunRequest,
     ExperimentRunResponse,
+    NodeDetailResponse,
+    NodeExecutorChangeRequest,
+    NodePlanChangeRequest,
     OptimizationRunRequest,
     OptimizationRunResponse,
     PlanChangeRequest,
@@ -29,7 +32,13 @@ from app.models.api import (
     TemplateSummary,
 )
 from app.models.artifacts import RegistryArtifact
-from app.models.runtime import ControlLevel, DeterminismMode, ReasoningVisibilityTier, ReviewDecision
+from app.models.runtime import (
+    ControlLevel,
+    DeterminismMode,
+    ReasoningVisibilityTier,
+    ReviewDecision,
+    TraceAccessRole,
+)
 from app.services.artifact_registry_service import ArtifactRegistryService
 from app.services.experiment_service import ExperimentService
 from app.services.optimization_service import OptimizationService
@@ -217,6 +226,14 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> TaskRunResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/tasks/{task_id}/nodes/{node_id}", response_model=NodeDetailResponse)
+def get_node_detail(task_id: str, node_id: str, db: Session = Depends(get_db)) -> NodeDetailResponse:
+    try:
+        return TaskService(db).get_node_detail(task_id, node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/tasks/{task_id}/audit")
 def get_audit_package(task_id: str, db: Session = Depends(get_db)) -> dict:
     try:
@@ -337,6 +354,24 @@ def plan_change(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/tasks/{task_id}/nodes/{node_id}/plan-change", response_model=PlanChangeResponse)
+def plan_node_change(
+    task_id: str,
+    node_id: str,
+    request: NodePlanChangeRequest,
+    db: Session = Depends(get_db),
+) -> PlanChangeResponse:
+    try:
+        return TaskService(db).plan_node_change(
+            task_id=task_id,
+            node_id=node_id,
+            request_text=request.request_text,
+            requested_by=request.requested_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/tasks/{task_id}/apply-planned-change", response_model=TaskRunResponse)
 def apply_planned_change(
     task_id: str,
@@ -349,6 +384,33 @@ def apply_planned_change(
             proposal_id=request.proposal_id,
             approved_by=request.approved_by,
             approval_notes=request.approval_notes,
+            auto_rerun=request.auto_rerun,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/nodes/{node_id}/change-executor", response_model=TaskRunResponse)
+def change_node_executor(
+    task_id: str,
+    node_id: str,
+    request: NodeExecutorChangeRequest,
+    db: Session = Depends(get_db),
+) -> TaskRunResponse:
+    try:
+        return TaskService(db).change_node_executor(
+            task_id=task_id,
+            node_id=node_id,
+            executor_type=request.executor_type,
+            executor_profile=request.executor_profile,
+            max_child_agents=request.max_child_agents,
+            max_recursion_depth=request.max_recursion_depth,
+            child_token_budget=request.child_token_budget,
+            delegated_summary_required=request.delegated_summary_required,
+            requested_by=request.requested_by,
+            approved_by=request.approved_by,
+            change_reason=request.change_reason,
+            instruction_note=request.instruction_note,
             auto_rerun=request.auto_rerun,
         )
     except ValueError as exc:
@@ -370,10 +432,12 @@ def diff_runs(
 def get_trace(
     task_id: str,
     tier: ReasoningVisibilityTier = ReasoningVisibilityTier.summary_trace,
+    viewer_role: TraceAccessRole = TraceAccessRole.reviewer,
+    viewer_id: str = "dashboard-user",
     db: Session = Depends(get_db),
 ) -> ReasoningTraceResponse:
     try:
-        return TaskService(db).get_reasoning_trace(task_id, tier)
+        return TaskService(db).get_reasoning_trace(task_id, tier, viewer_role=viewer_role, viewer_id=viewer_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

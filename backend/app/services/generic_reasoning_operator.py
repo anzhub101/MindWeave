@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from app.core.config import get_settings
 from app.models.runtime import (
+    ClaimClassification,
     EvidenceReference,
     EvidenceSupportLevel,
     ExecutorType,
@@ -71,6 +72,7 @@ class GenericReasoningOperator:
                     model_metadata={
                         "provider": "tool_runtime",
                         "executor_type": node.executor_type.value,
+                        "executor_profile": node.executor_profile,
                     },
                     finding_records=self._default_finding_records(node, evidence_refs),
                     final_output=self._build_fallback_final_output(state, node, {"tool_result": tool_result}, evidence_refs)
@@ -108,6 +110,7 @@ class GenericReasoningOperator:
             "expansion_contracts": node.expansion_contracts,
             "max_child_agents": node.max_child_agents,
             "max_recursion_depth": node.max_recursion_depth,
+            "child_token_budget": node.child_token_budget,
             "input_schema_definition": node_schema_definitions.get(node.input_schema_id or "", {}),
             "output_schema_definition": (
                 state.output_schema_definition
@@ -123,7 +126,12 @@ class GenericReasoningOperator:
             "control_level": state.control_level.value,
             "determinism_mode": state.determinism_mode.value,
             "is_final_node": is_final_node,
+            "delegation_policy": state.delegation_policy.model_dump(mode="json"),
         }
+        max_tokens = 3200 if is_final_node else 2000
+        delegated_token_budget = int(node.metadata.get("delegated_token_budget", 0) or 0)
+        if delegated_token_budget > 0:
+            max_tokens = min(max_tokens, max(256, delegated_token_budget))
         response = self.llm_gateway.generate(
             LLMRequest(
                 task="node_execution",
@@ -139,7 +147,7 @@ class GenericReasoningOperator:
                 model_id=state.model_id or None,
                 model_version=state.model_version or None,
                 agentic=True,
-                max_tokens=3200 if is_final_node else 2000,
+                max_tokens=max_tokens,
             )
         )
 
@@ -207,6 +215,8 @@ class GenericReasoningOperator:
                 "endpoint": response.endpoint,
                 "request_params": response.request_params,
                 "executor_type": node.executor_type.value,
+                "executor_profile": node.executor_profile,
+                "prompt_hash": prompt_trace.prompt_hash,
             },
             finding_records=finding_records,
             final_output=final_output if isinstance(final_output, dict) else None,
@@ -249,6 +259,15 @@ class GenericReasoningOperator:
 
         spawned: list[GraphNodeState] = []
         current_depth = int(parent.metadata.get("delegation_depth", 0))
+        total_child_token_budget = (
+            parent.child_token_budget
+            or int(parent.metadata.get("child_token_budget", 0) or 0)
+            or state.delegation_policy.default_child_token_budget
+        )
+        per_child_token_budget = max(
+            256,
+            int(total_child_token_budget / max(parent.max_child_agents, 1)),
+        )
         for index, item in enumerate(payload):
             if not isinstance(item, dict):
                 continue
@@ -259,7 +278,7 @@ class GenericReasoningOperator:
                 break
 
             node_id = str(item.get("id") or f"{parent.id}_child_{index + 1}")
-            next_nodes = item.get("next_nodes") or item.get("next") or []
+            next_nodes = item.get("next_nodes") or item.get("next") or list(parent.next_nodes)
             spawned.append(
                 GraphNodeState(
                     id=node_id,
@@ -273,7 +292,9 @@ class GenericReasoningOperator:
                     executor_type=item.get("executor_type") or ExecutorType.llm_operator,
                     max_child_agents=int(item.get("max_child_agents", 0)),
                     max_recursion_depth=int(item.get("max_recursion_depth", 0)),
+                    child_token_budget=0,
                     expansion_contracts=[str(value) for value in item.get("expansion_contracts", [])],
+                    delegated_summary_required=state.delegation_policy.require_child_summary,
                     required_approvals=int(item.get("required_approvals", 0)),
                     depends_on=[parent.id],
                     guarded_by=[str(value) for value in item.get("guarded_by", [])],
@@ -282,7 +303,8 @@ class GenericReasoningOperator:
                         **(item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}),
                         "delegation_depth": child_depth,
                         "delegated_from": parent.id,
-                        "parent_summary_required": True,
+                        "parent_summary_required": state.delegation_policy.require_child_summary,
+                        "delegated_token_budget": per_child_token_budget,
                     },
                     spawned_from=parent.id,
                 )
@@ -379,11 +401,18 @@ class GenericReasoningOperator:
                 support_level = item.get("support_level") or (
                     EvidenceSupportLevel.direct.value if linked_refs else EvidenceSupportLevel.inferred.value
                 )
+                claim_classification = self._normalize_claim_classification(
+                    item.get("claim_classification"),
+                    support_level=support_level,
+                    node=node,
+                    text=str(item.get("text") or item.get("summary") or ""),
+                )
                 records.append(
                     FindingRecord(
                         id=str(item.get("id") or f"{node.id}_finding_{index + 1}"),
                         text=str(item.get("text") or item.get("summary") or ""),
                         support_level=support_level,
+                        claim_classification=claim_classification,
                         evidence_refs=linked_refs,
                     )
                 )
@@ -400,6 +429,12 @@ class GenericReasoningOperator:
                         id=f"{node.id}_finding_{index + 1}",
                         text=finding.strip(),
                         support_level=EvidenceSupportLevel.direct if evidence_refs else EvidenceSupportLevel.inferred,
+                        claim_classification=self._normalize_claim_classification(
+                            None,
+                            support_level=EvidenceSupportLevel.direct if evidence_refs else EvidenceSupportLevel.inferred,
+                            node=node,
+                            text=finding.strip(),
+                        ),
                         evidence_refs=evidence_refs,
                     )
                 )
@@ -420,9 +455,37 @@ class GenericReasoningOperator:
                 id=f"{node.id}_finding_1",
                 text=text,
                 support_level=support_level,
+                claim_classification=GenericReasoningOperator._normalize_claim_classification(
+                    None,
+                    support_level=support_level,
+                    node=node,
+                    text=text,
+                ),
                 evidence_refs=evidence_refs,
             )
         ]
+
+    @staticmethod
+    def _normalize_claim_classification(
+        raw_value: Any,
+        support_level: Any,
+        node: GraphNodeState,
+        text: str,
+    ) -> ClaimClassification:
+        if raw_value in {classification.value for classification in ClaimClassification}:
+            return ClaimClassification(raw_value)
+
+        normalized_support = getattr(support_level, "value", str(support_level or ""))
+        if normalized_support == EvidenceSupportLevel.user_provided.value:
+            return ClaimClassification.human_entered
+        if normalized_support in {
+            EvidenceSupportLevel.inferred.value,
+            EvidenceSupportLevel.unsupported.value,
+        }:
+            return ClaimClassification.inferred
+        if node.operation_type in {"aggregate", "analyze"} and any(character.isdigit() for character in text):
+            return ClaimClassification.calculated
+        return ClaimClassification.grounded
 
     @staticmethod
     def _normalize_verification_status(value: Any) -> VerificationStatus:
@@ -470,6 +533,12 @@ class GenericReasoningOperator:
                 id=f"{node.id}_finding_{index + 1}",
                 text=finding,
                 support_level=EvidenceSupportLevel.direct if evidence_refs else EvidenceSupportLevel.inferred,
+                claim_classification=self._normalize_claim_classification(
+                    None,
+                    support_level=EvidenceSupportLevel.direct if evidence_refs else EvidenceSupportLevel.inferred,
+                    node=node,
+                    text=finding,
+                ),
                 evidence_refs=evidence_refs,
             )
             for index, finding in enumerate(findings)
@@ -488,15 +557,24 @@ class GenericReasoningOperator:
 
     @staticmethod
     def _delegation_allowed(state: GraphReasoningState, parent: GraphNodeState) -> bool:
+        if not state.delegation_policy.enabled:
+            return False
+        if state.control_level not in state.delegation_policy.allowed_control_levels:
+            return False
         if parent.executor_type != ExecutorType.agent_operator:
             return False
         if parent.max_child_agents <= 0:
             return False
+        child_budget = parent.child_token_budget or state.delegation_policy.default_child_token_budget
+        if child_budget <= 0:
+            return False
         if state.budget_usage.nodes_created >= state.budget_spec.max_nodes:
+            return False
+        policy = (state.program_blueprint or {}).get("policy", "priority_based")
+        if policy not in state.delegation_policy.allowed_program_policies:
             return False
         if parent.metadata.get("delegation_requested") is True:
             return True
         complexity_score = float(parent.metadata.get("complexity_score", 0))
-        threshold = float(parent.metadata.get("delegation_threshold", 8))
-        policy = (state.program_blueprint or {}).get("policy", "priority_based")
-        return complexity_score >= threshold and policy in {"priority_based", "breadth_first", "cost_aware"}
+        threshold = float(parent.metadata.get("delegation_threshold", state.delegation_policy.complexity_threshold))
+        return complexity_score >= threshold

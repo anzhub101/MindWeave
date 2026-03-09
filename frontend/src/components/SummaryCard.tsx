@@ -2,6 +2,9 @@ import { Download, ShieldCheck, X } from "lucide-react";
 
 interface SummaryCardProps {
   status: "queued" | "running" | "paused" | "completed" | "failed";
+  determinismMode?: string;
+  controlLevel?: string;
+  modelVersion?: string;
   summary: {
     headline: string;
     verdict: string;
@@ -20,6 +23,9 @@ interface SummaryCardProps {
 
 export function SummaryCard({
   status,
+  determinismMode,
+  controlLevel,
+  modelVersion,
   summary,
   pendingReviewNodeId,
   onApproveReview,
@@ -126,6 +132,9 @@ export function SummaryCard({
                   {status === "completed"
                     ? "Verifiable audit package ready for export."
                     : "Traceable reasoning state is available for review and export."}
+                </div>
+                <div className="mt-3 text-[12px] uppercase tracking-[0.14em] text-[var(--mw-subtle)]">
+                  {determinismMode ? `${determinismMode.replace(/_/g, " ")}` : "runtime"} · {controlLevel ? controlLevel.replace(/_/g, " ") : "control"} · {modelVersion || "model unavailable"}
                 </div>
               </div>
             </div>

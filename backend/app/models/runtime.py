@@ -96,11 +96,25 @@ class ReasoningVisibilityTier(str, Enum):
     expanded_analytic_trace = "expanded_analytic_trace"
 
 
+class TraceAccessRole(str, Enum):
+    viewer = "viewer"
+    reviewer = "reviewer"
+    auditor = "auditor"
+    admin = "admin"
+
+
 class ExecutorType(str, Enum):
     llm_operator = "llm_operator"
     tool_operator = "tool_operator"
     agent_operator = "agent_operator"
     human_operator = "human_operator"
+
+
+class ClaimClassification(str, Enum):
+    grounded = "grounded"
+    inferred = "inferred"
+    calculated = "calculated"
+    human_entered = "human_entered"
 
 
 class EvidenceSupportLevel(str, Enum):
@@ -147,6 +161,7 @@ class FindingRecord(BaseModel):
     id: str
     text: str
     support_level: EvidenceSupportLevel = EvidenceSupportLevel.direct
+    claim_classification: ClaimClassification = ClaimClassification.grounded
     evidence_refs: list[EvidenceReference] = Field(default_factory=list)
 
     @field_validator("evidence_refs", mode="before")
@@ -200,6 +215,69 @@ class GraphPatchRecord(BaseModel):
     resulting_program_version: str
     auto_rerun: bool = True
     applied_at: datetime = Field(default_factory=utcnow)
+
+
+class GraphVersionRecord(BaseModel):
+    version_id: str = Field(default_factory=lambda: f"graph_version_{uuid4().hex[:10]}")
+    program_version: str
+    blueprint_hash: str
+    created_by: str
+    reason: str
+    patch_id: str | None = None
+    parent_program_version: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class PatchDiffRecord(BaseModel):
+    patch_id: str
+    patch_type: str
+    before_program_version: str
+    after_program_version: str
+    before_blueprint_hash: str
+    after_blueprint_hash: str
+    added_nodes: list[str] = Field(default_factory=list)
+    removed_nodes: list[str] = Field(default_factory=list)
+    changed_nodes: list[str] = Field(default_factory=list)
+    added_edges: list[str] = Field(default_factory=list)
+    removed_edges: list[str] = Field(default_factory=list)
+    changed_policy: bool = False
+    changed_budget: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class TraceAccessRecord(BaseModel):
+    task_id: str
+    viewer_id: str
+    viewer_role: TraceAccessRole
+    requested_tier: ReasoningVisibilityTier
+    effective_tier: ReasoningVisibilityTier
+    entry_count: int
+    accessed_at: datetime = Field(default_factory=utcnow)
+
+
+class ApprovalState(BaseModel):
+    required_approvals: int = 0
+    approved_count: int = 0
+    pending_approvals: int = 0
+    requires_human_review: bool = False
+    status: str = "not_required"
+
+
+class DelegationPolicy(BaseModel):
+    enabled: bool = True
+    allowed_control_levels: list[ControlLevel] = Field(
+        default_factory=lambda: [
+            ControlLevel.exploratory,
+            ControlLevel.operational,
+            ControlLevel.regulated,
+        ]
+    )
+    allowed_program_policies: list[str] = Field(
+        default_factory=lambda: ["priority_based", "breadth_first", "cost_aware"]
+    )
+    complexity_threshold: float = 8.0
+    default_child_token_budget: int = 4000
+    require_child_summary: bool = True
 
 
 class ThoughtRecord(BaseModel):
@@ -283,16 +361,23 @@ class GraphNodeState(BaseModel):
     output_schema_id: str | None = None
     priority: int
     executor_type: ExecutorType = ExecutorType.llm_operator
+    executor_profile: str | None = None
     max_child_agents: int = 0
     max_recursion_depth: int = 0
+    child_token_budget: int = 0
     expansion_contracts: list[str] = Field(default_factory=list)
+    delegated_summary_required: bool = False
     required_approvals: int = 0
+    approval_state: ApprovalState = Field(default_factory=ApprovalState)
     status: NodeStatus = NodeStatus.pending
     verification_status: VerificationStatus = VerificationStatus.pending
+    verification_checks: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     guarded_by: list[str] = Field(default_factory=list)
     next_nodes: list[str] = Field(default_factory=list)
     evidence_refs: list[EvidenceReference] = Field(default_factory=list)
+    finding_records: list[FindingRecord] = Field(default_factory=list)
+    thought_summary: str = ""
     inputs: dict[str, Any] = Field(default_factory=dict)
     output: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -300,6 +385,8 @@ class GraphNodeState(BaseModel):
     prompt_hash: str | None = None
     evaluation_score: float | None = None
     evidence_scope: dict[str, Any] = Field(default_factory=dict)
+    delegated_children: list[str] = Field(default_factory=list)
+    patch_history: list[str] = Field(default_factory=list)
     spawned_from: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
@@ -347,6 +434,10 @@ class GraphReasoningState(BaseModel):
     evidence_graph_edges: list[EvidenceGraphEdge] = Field(default_factory=list)
     prompt_traces: list[PromptTrace] = Field(default_factory=list)
     graph_patch_history: list[GraphPatchRecord] = Field(default_factory=list)
+    graph_version_history: list[GraphVersionRecord] = Field(default_factory=list)
+    patch_diff_history: list[PatchDiffRecord] = Field(default_factory=list)
+    trace_access_history: list[TraceAccessRecord] = Field(default_factory=list)
+    delegation_policy: DelegationPolicy = Field(default_factory=DelegationPolicy)
     change_intents: list[ChangeIntent] = Field(default_factory=list)
     patch_proposals: list[PatchProposal] = Field(default_factory=list)
     patch_validation_history: list[PatchValidationResult] = Field(default_factory=list)

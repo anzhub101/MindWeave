@@ -168,7 +168,10 @@ class Controller:
         state.evaluation_logs.extend(evaluation_logs)
         node.output = result.output
         node.evidence_refs = result.evidence_refs
+        node.finding_records = result.finding_records
+        node.thought_summary = result.thought_summary or node.subtitle
         node.verification_status = result.verification_status
+        node.verification_checks = result.verification_checks
         node.model_metadata = result.model_metadata
         node.prompt_hash = result.prompt_trace.prompt_hash if result.prompt_trace is not None else node.prompt_hash
         node.completed_at = utcnow()
@@ -221,13 +224,73 @@ class Controller:
             state.final_summary = result.final_summary
 
         if result.spawned_nodes:
+            spawned_ids: list[str] = []
             for spawned_node in result.spawned_nodes:
                 self.constraints.assert_spawn_allowed(state, node.id, spawned_node.id, spawned_node.next_nodes)
                 state.nodes[spawned_node.id] = spawned_node
+                spawned_ids.append(spawned_node.id)
+                spawned_node.executor_profile = spawned_node.executor_profile or spawned_node.metadata.get("executor_profile")
+                if spawned_node.id not in node.next_nodes:
+                    node.next_nodes.append(spawned_node.id)
+                state.edges.append(GraphEdge(source=node.id, target=spawned_node.id, kind="delegated_execution"))
+                for target_id in spawned_node.next_nodes:
+                    if target_id in state.nodes and spawned_node.id not in state.nodes[target_id].depends_on:
+                        state.nodes[target_id].depends_on.append(spawned_node.id)
                 state.edges.extend(
                     GraphEdge(source=spawned_node.id, target=target_id) for target_id in spawned_node.next_nodes
                 )
+            node.metadata["spawned_child_ids"] = sorted(
+                set(node.metadata.get("spawned_child_ids", [])) | set(spawned_ids)
+            )
+            node.delegated_children = sorted(set(node.delegated_children) | set(spawned_ids))
+            if node.delegated_summary_required:
+                node.metadata["delegation_summary_complete"] = False
+            self._log(
+                state,
+                "delegation_spawned",
+                f"Spawned delegated child nodes from {node.id}.",
+                node.id,
+                {"child_node_ids": spawned_ids},
+            )
             self.budget_manager.update_runtime(state)
+
+        if node.spawned_from and node.spawned_from in state.nodes:
+            parent = state.nodes[node.spawned_from]
+            child_summary = {
+                "child_node_id": node.id,
+                "summary": result.thought_summary or node.subtitle,
+                "output": result.output,
+                "finding_records": [record.model_dump(mode="json") for record in result.finding_records],
+            }
+            delegated_summaries = list(parent.metadata.get("delegated_summaries", []))
+            delegated_summaries = [
+                item for item in delegated_summaries if item.get("child_node_id") != node.id
+            ]
+            delegated_summaries.append(child_summary)
+            parent.metadata["delegated_summaries"] = delegated_summaries
+            if parent.delegated_summary_required:
+                spawned_child_ids = set(parent.metadata.get("spawned_child_ids", []))
+                completed_child_ids = {
+                    child_id
+                    for child_id in spawned_child_ids
+                    if child_id in state.nodes and state.nodes[child_id].status == NodeStatus.completed
+                }
+                parent.metadata["delegation_summary_complete"] = spawned_child_ids.issubset(completed_child_ids)
+                if parent.metadata["delegation_summary_complete"]:
+                    self._log(
+                        state,
+                        "delegation_completed",
+                        f"Delegated child summaries completed for {parent.id}.",
+                        parent.id,
+                        {"child_node_ids": sorted(spawned_child_ids)},
+                    )
+            self._log(
+                state,
+                "delegation_child_summary_recorded",
+                f"Recorded delegated child summary from {node.id} back to {parent.id}.",
+                node.id,
+                {"parent_node_id": parent.id},
+            )
 
         if not result.cache_hit:
             self.budget_manager.record_tokens(state, result.llm_usage_tokens)

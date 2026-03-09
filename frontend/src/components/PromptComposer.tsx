@@ -7,8 +7,10 @@ interface PromptComposerProps {
   onPromptChange: (value: string) => void;
   onSubmit: () => void;
   onFileSelect: (files: File[]) => void;
-  deterministic: boolean;
-  onDeterministicChange: (value: boolean) => void;
+  determinismMode: "non_deterministic" | "best_effort_deterministic" | "strict_deterministic";
+  onDeterminismModeChange: (value: "non_deterministic" | "best_effort_deterministic" | "strict_deterministic") => void;
+  controlLevel: "exploratory" | "operational" | "regulated" | "strict_audit";
+  onControlLevelChange: (value: "exploratory" | "operational" | "regulated" | "strict_audit") => void;
   autoApproveHumanReview: boolean;
   onAutoApproveHumanReviewChange: (value: boolean) => void;
   files: File[];
@@ -22,8 +24,10 @@ export function PromptComposer({
   onPromptChange,
   onSubmit,
   onFileSelect,
-  deterministic,
-  onDeterministicChange,
+  determinismMode,
+  onDeterminismModeChange,
+  controlLevel,
+  onControlLevelChange,
   autoApproveHumanReview,
   onAutoApproveHumanReviewChange,
   files,
@@ -91,13 +95,29 @@ export function PromptComposer({
                 </div>
                 <div className="flex flex-wrap gap-3 text-xs text-[var(--mw-muted)]">
                   <label className="flex items-center gap-2 rounded-full border border-[var(--mw-border)] bg-[var(--mw-node)] px-3 py-2">
-                    <input
-                      type="checkbox"
-                      checked={deterministic}
-                      onChange={(event) => onDeterministicChange(event.target.checked)}
-                      className="h-4 w-4 accent-[var(--mw-accent)]"
-                    />
-                    Deterministic mode
+                    <span>Mode</span>
+                    <select
+                      value={determinismMode}
+                      onChange={(event) => onDeterminismModeChange(event.target.value as PromptComposerProps["determinismMode"])}
+                      className="bg-transparent text-[var(--mw-text)] outline-none"
+                    >
+                      <option value="non_deterministic">Non-deterministic</option>
+                      <option value="best_effort_deterministic">Best-effort deterministic</option>
+                      <option value="strict_deterministic">Strict deterministic</option>
+                    </select>
+                  </label>
+                  <label className="flex items-center gap-2 rounded-full border border-[var(--mw-border)] bg-[var(--mw-node)] px-3 py-2">
+                    <span>Control</span>
+                    <select
+                      value={controlLevel}
+                      onChange={(event) => onControlLevelChange(event.target.value as PromptComposerProps["controlLevel"])}
+                      className="bg-transparent text-[var(--mw-text)] outline-none"
+                    >
+                      <option value="exploratory">Exploratory</option>
+                      <option value="operational">Operational</option>
+                      <option value="regulated">Regulated</option>
+                      <option value="strict_audit">Strict audit</option>
+                    </select>
                   </label>
                   <label className="flex items-center gap-2 rounded-full border border-[var(--mw-border)] bg-[var(--mw-node)] px-3 py-2">
                     <input

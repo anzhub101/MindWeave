@@ -141,6 +141,7 @@ Supported patch types:
 - `change_policy`
 - `change_budget`
 - `change_evidence_scope`
+- `change_executor`
 - `expand_node`
 
 Examples:
@@ -199,6 +200,67 @@ Examples:
 }
 ```
 
+## Plan a Natural-Language Change
+
+Endpoint:
+
+```text
+POST /api/tasks/{task_id}/plan-change
+```
+
+Request body shape:
+
+```json
+{
+  "request_text": "Expand the fraud branch and assign a forensic agent",
+  "requested_by": "qa-reviewer",
+  "selected_node_id": "analysis"
+}
+```
+
+Response groups:
+
+- `status`
+- `intent`
+- `proposal`
+- `validation`
+- `target_node_resolution`
+- `clarification_question`
+
+Possible statuses:
+
+- `proposed`
+- `invalid`
+- `needs_clarification`
+
+If the planner cannot safely resolve the target node, it returns `needs_clarification` instead of a patch proposal.
+
+## Apply a Planned Change
+
+Endpoint:
+
+```text
+POST /api/tasks/{task_id}/apply-planned-change
+```
+
+Request body shape:
+
+```json
+{
+  "proposal_id": "proposal_ab12cd34",
+  "approved_by": "audit-lead",
+  "approval_notes": "Approved for rerun.",
+  "auto_rerun": true
+}
+```
+
+Behavior:
+
+- only validated proposals can be applied
+- `regulated` and `strict_audit` tasks require approval
+- high-risk proposals also require approval
+- application flows through the structured graph patch engine rather than mutating the graph directly from NL
+
 ## Retrieve a Structured Reasoning Trace
 
 Endpoint:
@@ -243,6 +305,9 @@ The audit package includes:
 - evaluation logs
 - schema validation logs
 - event log
+- change intents
+- patch proposals
+- patch validation history
 
 ## Evidence Model
 

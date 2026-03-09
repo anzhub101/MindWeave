@@ -5,6 +5,7 @@ from typing import Any
 
 from app.models.artifacts import BudgetSpec
 from app.models.runtime import (
+    ExecutorType,
     GraphEdge,
     GraphNodeState,
     GraphPatchRecord,
@@ -90,9 +91,12 @@ class GraphPatchService:
             output_schema_id=raw_node.get("output_schema_id"),
             priority=int(raw_node.get("priority", max((node.priority for node in state.nodes.values()), default=0) + 5)),
             executor_type=raw_node.get("executor_type", "llm_operator"),
+            executor_profile=raw_node.get("executor_profile"),
             max_child_agents=int(raw_node.get("max_child_agents", 0) or 0),
             max_recursion_depth=int(raw_node.get("max_recursion_depth", 0) or 0),
+            child_token_budget=int(raw_node.get("child_token_budget", 0) or 0),
             expansion_contracts=[str(value) for value in raw_node.get("expansion_contracts", [])],
+            delegated_summary_required=bool(raw_node.get("delegated_summary_required", False)),
             required_approvals=int(raw_node.get("required_approvals", 0) or 0),
             depends_on=depends_on,
             guarded_by=[str(value) for value in raw_node.get("guarded_by", [])],
@@ -107,12 +111,12 @@ class GraphPatchService:
                 continue
             if node_id not in state.nodes[dependency_id].next_nodes:
                 state.nodes[dependency_id].next_nodes.append(node_id)
-            state.edges.append(GraphEdge(source=dependency_id, target=node_id))
+            self._append_edge_if_missing(state, GraphEdge(source=dependency_id, target=node_id))
 
         for next_node_id in next_nodes:
             if next_node_id in state.nodes and node_id not in state.nodes[next_node_id].depends_on:
                 state.nodes[next_node_id].depends_on.append(node_id)
-            state.edges.append(GraphEdge(source=node_id, target=next_node_id))
+            self._append_edge_if_missing(state, GraphEdge(source=node_id, target=next_node_id))
 
     def _remove_node(self, state: GraphReasoningState, target_node_id: str | None) -> None:
         if not target_node_id or target_node_id not in state.nodes:
@@ -171,11 +175,14 @@ class GraphPatchService:
             node.status = NodeStatus.pending
             node.verification_status = VerificationStatus.pending
             node.evidence_refs = []
+            node.finding_records = []
+            node.thought_summary = ""
             node.inputs = {}
             node.output = {}
             node.model_metadata = {}
             node.prompt_hash = None
             node.evaluation_score = None
+            node.verification_checks = []
             node.started_at = None
             node.completed_at = None
             node.latency_ms = None
@@ -230,8 +237,7 @@ class GraphPatchService:
         if note:
             node.instruction = f"{node.instruction}\n{note}".strip()
 
-    @staticmethod
-    def _expand_node(state: GraphReasoningState, target_node_id: str | None, payload: dict[str, Any]) -> None:
+    def _expand_node(self, state: GraphReasoningState, target_node_id: str | None, payload: dict[str, Any]) -> None:
         if not target_node_id or target_node_id not in state.nodes:
             raise ValueError("expand_node requires an existing target_node_id.")
         node = state.nodes[target_node_id]
@@ -239,8 +245,16 @@ class GraphPatchService:
         if isinstance(contracts, list):
             node.expansion_contracts = [str(value) for value in contracts if str(value).strip()]
         node.metadata["delegation_requested"] = bool(payload.get("expand_subgraph", False))
-        if node.executor_type == "agent_operator" and node.max_child_agents == 0:
+        node.executor_profile = str(payload.get("executor_profile") or node.executor_profile or "") or None
+        if "child_token_budget" in payload:
+            node.child_token_budget = int(payload.get("child_token_budget", node.child_token_budget or 0) or 0)
+        if node.executor_type == ExecutorType.agent_operator and node.max_child_agents == 0:
             node.max_child_agents = int(payload.get("max_child_agents", 2))
+        if node.executor_type == ExecutorType.agent_operator and node.child_token_budget == 0:
+            node.child_token_budget = int(payload.get("child_token_budget", 4000) or 4000)
+        node.delegated_summary_required = bool(payload.get("delegated_summary_required", node.delegated_summary_required))
+        if bool(payload.get("expand_subgraph")) or "expand_subgraph" in node.expansion_contracts:
+            self._materialize_expanded_children(state, node, payload)
 
     @staticmethod
     def _change_executor(state: GraphReasoningState, target_node_id: str | None, payload: dict[str, Any]) -> None:
@@ -250,11 +264,17 @@ class GraphPatchService:
         executor_type = str(payload.get("executor_type") or "").strip()
         if not executor_type:
             raise ValueError("change_executor requires an executor_type value.")
-        node.executor_type = executor_type
+        try:
+            node.executor_type = ExecutorType(executor_type)
+        except ValueError as exc:
+            raise ValueError(f"Unsupported executor_type: {executor_type}") from exc
         node.max_child_agents = int(payload.get("max_child_agents", node.max_child_agents or 0) or 0)
         node.max_recursion_depth = int(payload.get("max_recursion_depth", node.max_recursion_depth or 0) or 0)
-        if payload.get("executor_profile"):
-            node.metadata["executor_profile"] = payload["executor_profile"]
+        node.child_token_budget = int(payload.get("child_token_budget", node.child_token_budget or 0) or 0)
+        node.delegated_summary_required = bool(payload.get("delegated_summary_required", node.delegated_summary_required))
+        node.executor_profile = str(payload.get("executor_profile") or node.executor_profile or "") or None
+        if node.executor_profile:
+            node.metadata["executor_profile"] = node.executor_profile
         note = str(payload.get("instruction_note") or "").strip()
         if note:
             node.instruction = f"{node.instruction}\n{note}".strip()
@@ -297,9 +317,12 @@ class GraphPatchService:
                 "output_schema_id": node.output_schema_id,
                 "priority": node.priority,
                 "executor_type": getattr(node.executor_type, "value", str(node.executor_type)),
+                "executor_profile": node.executor_profile,
                 "max_child_agents": node.max_child_agents,
                 "max_recursion_depth": node.max_recursion_depth,
+                "child_token_budget": node.child_token_budget,
                 "expansion_contracts": node.expansion_contracts,
+                "delegated_summary_required": node.delegated_summary_required,
                 "required_approvals": node.required_approvals,
                 "depends_on": node.depends_on,
                 "guarded_by": node.guarded_by,
@@ -310,3 +333,62 @@ class GraphPatchService:
             for node in state.nodes.values()
         ]
         state.program_blueprint = blueprint
+
+    @staticmethod
+    def _append_edge_if_missing(state: GraphReasoningState, candidate: GraphEdge) -> None:
+        if any(
+            edge.source == candidate.source and edge.target == candidate.target and edge.kind == candidate.kind
+            for edge in state.edges
+        ):
+            return
+        state.edges.append(candidate)
+
+    def _materialize_expanded_children(
+        self,
+        state: GraphReasoningState,
+        node: GraphNodeState,
+        payload: dict[str, Any],
+    ) -> None:
+        existing_child_ids = list(node.metadata.get("expanded_child_ids", []))
+        original_next_nodes = list(node.metadata.get("pre_expansion_next_nodes", node.next_nodes))
+        if not original_next_nodes:
+            original_next_nodes = list(node.next_nodes)
+        node.metadata["pre_expansion_next_nodes"] = list(original_next_nodes)
+
+        requested_children = int(payload.get("visible_child_count", payload.get("max_child_agents", 1)) or 1)
+        child_count = max(1, min(requested_children, 3))
+        materialized_child_ids: list[str] = []
+
+        for index in range(child_count):
+            child_id = f"{node.id}_expanded_{index + 1}"
+            materialized_child_ids.append(child_id)
+            if child_id not in state.nodes:
+                child_node = GraphNodeState(
+                    id=child_id,
+                    title=f"{node.title} Branch {index + 1}",
+                    subtitle="Expanded reasoning branch",
+                    operation_type="analyze",
+                    instruction=f"Expand {node.title} according to the requested contracts and summarize back into the parent flow.",
+                    success_criteria=["Expansion request addressed", "Reasoning is grounded in evidence"],
+                    evaluation_ids=["output_present"],
+                    priority=node.priority + index + 1,
+                    executor_type=ExecutorType.llm_operator,
+                    depends_on=[node.id],
+                    next_nodes=list(original_next_nodes),
+                    metadata={
+                        "expanded_from": node.id,
+                        "expansion_contracts": list(node.expansion_contracts),
+                    },
+                    spawned_from=node.id,
+                )
+                state.nodes[child_id] = child_node
+            if child_id not in node.next_nodes:
+                node.next_nodes.append(child_id)
+            self._append_edge_if_missing(state, GraphEdge(source=node.id, target=child_id, kind="expanded_branch"))
+            for next_node_id in original_next_nodes:
+                if next_node_id in state.nodes and child_id not in state.nodes[next_node_id].depends_on:
+                    state.nodes[next_node_id].depends_on.append(child_id)
+                self._append_edge_if_missing(state, GraphEdge(source=child_id, target=next_node_id, kind="expanded_branch"))
+
+        node.metadata["expanded_child_ids"] = materialized_child_ids
+        node.delegated_children = sorted(set(node.delegated_children) | set(materialized_child_ids))

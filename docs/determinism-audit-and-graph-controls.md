@@ -44,10 +44,17 @@ Primary runtime fields on `GraphReasoningState`:
 - `model_id`
 - `model_version`
 - `provider_fingerprint`
+- `execution_endpoint`
 - `prompt_hash`
 - `grs_hash`
 - `execution_env_hash`
 - `reproducibility_hash`
+
+Prompt traces now also record:
+
+- `request_payload`
+- `response_payload`
+- `response_hash`
 
 ### Strict deterministic
 
@@ -171,6 +178,7 @@ Supported patch types:
 - `change_policy`
 - `change_budget`
 - `change_evidence_scope`
+- `change_executor`
 - `expand_node`
 
 Patch record fields:
@@ -193,6 +201,8 @@ Primary code:
 
 - `backend/app/services/graph_patch_service.py`
 - `backend/app/services/task_service.py`
+
+Natural-language planning now sits on top of the patch engine; see [docs/nl-graph-planner-implementation.md](/Users/manzeem/MindWeave/docs/nl-graph-planner-implementation.md).
 
 ## 6. Node-Level Delegation
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 
-from app.change_planning.intent_models import PatchProposal, PatchValidationResult
+from app.change_planning.intent_models import PatchProposal, PatchValidationResult, PlannedPatchOperation
 from app.models.runtime import ControlLevel, GraphReasoningState
 from app.services.graph_patch_service import GraphPatchService
 
@@ -81,6 +81,44 @@ class ValidationBridge:
             requires_approval=proposal.requires_approval,
             affected_nodes=proposal.affected_node_ids,
         )
+
+    def validate_patch(
+        self,
+        state: GraphReasoningState,
+        patch_type: str,
+        target_node_id: str | None,
+        payload: dict[str, object] | None = None,
+        change_reason: str = "",
+    ) -> PatchValidationResult:
+        risk_level = (
+            "high"
+            if patch_type in {"remove_node", "rewire_dependency", "change_executor", "change_policy"}
+            else "medium"
+            if patch_type in {"add_node", "expand_node", "change_evidence_scope", "change_budget"}
+            else "low"
+        )
+        proposal = PatchProposal(
+            proposal_id=f"direct_{patch_type}",
+            intent_id="direct_patch",
+            patches=[
+                PlannedPatchOperation(
+                    patch_type=patch_type,
+                    target_node_id=target_node_id,
+                    payload=payload or {},
+                    change_reason=change_reason or f"Direct patch {patch_type}",
+                )
+            ],
+            summary=f"Direct patch {patch_type}",
+            explanation="Validation wrapper for direct graph patch application.",
+            affected_node_ids=[target_node_id] if target_node_id else [],
+            rerun_scope="subtree" if patch_type == "rerun_subtree" else "none",
+            risk_level=risk_level,
+            requires_approval=state.control_level in {ControlLevel.regulated, ControlLevel.strict_audit}
+            or risk_level == "high",
+            planner_confidence=1.0,
+            status="proposed",
+        )
+        return self.validate(state, proposal)
 
     @staticmethod
     def _creates_cycle(state: GraphReasoningState) -> bool:

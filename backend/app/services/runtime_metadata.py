@@ -25,6 +25,14 @@ NON_DETERMINISTIC_KEYS = {
     "replay_of_task_id",
     "replay_source_snapshot_label",
     "trace_id",
+    "version_id",
+    "patch_id",
+    "proposal_id",
+    "intent_id",
+    "requested_at",
+    "applied_at",
+    "approved_at",
+    "accessed_at",
     "cache_hit",
     "logs",
     "grs_hash",
@@ -164,3 +172,20 @@ def trace_from_request_response(
         prompt_hash=prompt_hash(prompt=prompt, system_prompt=system_prompt, context=context, params=params),
         response_hash=stable_hash(normalized_response_payload),
     )
+
+
+def ui_model_metadata(model_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(model_metadata, dict):
+        return {}
+    request_params = model_metadata.get("request_params", {})
+    return {
+        "provider": model_metadata.get("provider"),
+        "model_id": model_metadata.get("model_id"),
+        "model_version": model_metadata.get("model_version"),
+        "provider_fingerprint": model_metadata.get("provider_fingerprint"),
+        "endpoint": model_metadata.get("endpoint"),
+        "prompt_hash": model_metadata.get("prompt_hash"),
+        "temperature": request_params.get("temperature") if isinstance(request_params, dict) else None,
+        "top_p": request_params.get("top_p") if isinstance(request_params, dict) else None,
+        "seed": request_params.get("seed") if isinstance(request_params, dict) else None,
+    }

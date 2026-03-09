@@ -43,6 +43,8 @@ docs/
   technical-summary.md
   determinism-audit-and-graph-controls.md
   runtime-operations-guide.md
+  best-effort-determinism-implementation.md
+  nl-graph-planner-implementation.md
 ```
 
 ## Backend Setup
@@ -230,6 +232,8 @@ The provider abstraction lives in [backend/app/services/llm_gateway.py](/Users/m
 
 - Determinism, audit, and graph controls: [docs/determinism-audit-and-graph-controls.md](/Users/manzeem/MindWeave/docs/determinism-audit-and-graph-controls.md)
 - Runtime operations guide: [docs/runtime-operations-guide.md](/Users/manzeem/MindWeave/docs/runtime-operations-guide.md)
+- Best-effort determinism implementation: [docs/best-effort-determinism-implementation.md](/Users/manzeem/MindWeave/docs/best-effort-determinism-implementation.md)
+- NL graph planner implementation: [docs/nl-graph-planner-implementation.md](/Users/manzeem/MindWeave/docs/nl-graph-planner-implementation.md)
 
 ## Verification and Auditability
 

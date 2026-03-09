@@ -148,6 +148,8 @@ class IntentParserService:
                 "expansion_contracts": [value for value in expansion_contracts if value in ALLOWED_EXPANSION_CONTRACTS],
                 "expand_subgraph": "expand_subgraph" in expansion_contracts,
                 "max_child_agents": 2 if "agent" in normalized else 0,
+                "child_token_budget": 4000 if "agent" in normalized or "subgraph" in normalized else 0,
+                "delegated_summary_required": True,
             }
         if intent_type == "rerun_subtree":
             assumption_profile = "conservative" if "conservative" in normalized else "baseline"
@@ -173,6 +175,8 @@ class IntentParserService:
                     "evaluation_ids": ["output_present"],
                     "priority": max((node.priority for node in state.nodes.values()), default=0) + 5,
                     "executor_type": ExecutorType.llm_operator.value,
+                    "child_token_budget": 0,
+                    "delegated_summary_required": False,
                     "metadata": {"planned_from_nl_request": True},
                 },
             }
@@ -224,6 +228,8 @@ class IntentParserService:
                 "executor_type": executor_type,
                 "max_child_agents": 2 if executor_type == ExecutorType.agent_operator.value else 0,
                 "max_recursion_depth": 1 if executor_type == ExecutorType.agent_operator.value else 0,
+                "child_token_budget": 4000 if executor_type == ExecutorType.agent_operator.value else 0,
+                "delegated_summary_required": executor_type == ExecutorType.agent_operator.value,
             }
             if "forensic" in normalized:
                 payload["executor_profile"] = "forensic"

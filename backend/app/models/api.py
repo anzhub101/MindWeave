@@ -8,19 +8,25 @@ from pydantic import BaseModel, Field
 from app.models.artifacts import ArtifactPromotion
 from app.change_planning.intent_models import ChangeIntent, NodeResolutionResult, PatchProposal, PatchValidationResult
 from app.models.runtime import (
+    ApprovalState,
     ControlLevel,
     DeterminismMode,
     DocumentRecord,
     EvidenceGraphEdge,
     EvidenceGraphNode,
+    EvidenceReference,
+    FindingRecord,
     GraphPatchRecord,
+    GraphVersionRecord,
     GraphEdge,
     GraphNodeState,
+    PatchDiffRecord,
     PromptTrace,
     ReasoningVisibilityTier,
     ReviewDecision,
     SchemaValidationLogEntry,
     TaskStatus,
+    TraceAccessRecord,
 )
 
 
@@ -176,6 +182,9 @@ class TaskRunResponse(BaseModel):
     evidence_graph_edges: list[EvidenceGraphEdge] = Field(default_factory=list)
     prompt_traces: list[PromptTrace] = Field(default_factory=list)
     graph_patch_history: list[GraphPatchRecord] = Field(default_factory=list)
+    graph_version_history: list[GraphVersionRecord] = Field(default_factory=list)
+    patch_diff_history: list[PatchDiffRecord] = Field(default_factory=list)
+    trace_access_history: list[TraceAccessRecord] = Field(default_factory=list)
     program_blueprint: dict[str, Any] | None
     output_schema_definition: dict[str, Any] | None
     final_output: dict[str, Any] | None
@@ -224,6 +233,11 @@ class PlanChangeRequest(BaseModel):
     selected_node_id: str | None = None
 
 
+class NodePlanChangeRequest(BaseModel):
+    request_text: str
+    requested_by: str = "dashboard-user"
+
+
 class PlanChangeResponse(BaseModel):
     task_id: str
     status: str
@@ -238,6 +252,20 @@ class ApplyPlannedChangeRequest(BaseModel):
     proposal_id: str
     approved_by: str | None = None
     approval_notes: str = ""
+    auto_rerun: bool = True
+
+
+class NodeExecutorChangeRequest(BaseModel):
+    executor_type: str
+    executor_profile: str | None = None
+    max_child_agents: int = 0
+    max_recursion_depth: int = 0
+    child_token_budget: int = 0
+    delegated_summary_required: bool = False
+    requested_by: str = "dashboard-user"
+    approved_by: str | None = None
+    change_reason: str = ""
+    instruction_note: str = ""
     auto_rerun: bool = True
 
 
@@ -285,3 +313,17 @@ class ReasoningTraceResponse(BaseModel):
     tier: ReasoningVisibilityTier
     entries: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NodeDetailResponse(BaseModel):
+    task_id: str
+    node: GraphNodeState
+    key_conclusion: str = ""
+    evidence_count: int = 0
+    top_evidence: list[EvidenceReference] = Field(default_factory=list)
+    finding_records: list[FindingRecord] = Field(default_factory=list)
+    approval_state: ApprovalState = Field(default_factory=ApprovalState)
+    delegated_children: list[str] = Field(default_factory=list)
+    delegated_summaries: list[dict[str, Any]] = Field(default_factory=list)
+    patch_history: list[GraphPatchRecord] = Field(default_factory=list)
+    technical_details: dict[str, Any] = Field(default_factory=dict)

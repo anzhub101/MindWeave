@@ -29,6 +29,8 @@ The main MVP requirement groups are covered as follows.
 - Output Validation: the final structured output is validated against the synthesized JSON Schema before the run is considered healthy.
 - LLM Orchestration: [backend/app/services/llm_gateway.py](/Users/manzeem/MindWeave/backend/app/services/llm_gateway.py) uses K2 Think v2 via the agentic endpoint for program synthesis and node execution.
 - Determinism, audit, and graph controls: [docs/determinism-audit-and-graph-controls.md](/Users/manzeem/MindWeave/docs/determinism-audit-and-graph-controls.md) records the implemented determinism modes, replay/diff support, evidence graph, graph patches, approval gates, and control-level behavior.
+- Best-effort determinism implementation details: [docs/best-effort-determinism-implementation.md](/Users/manzeem/MindWeave/docs/best-effort-determinism-implementation.md)
+- NL graph planner implementation details: [docs/nl-graph-planner-implementation.md](/Users/manzeem/MindWeave/docs/nl-graph-planner-implementation.md)
 
 ## 3. Domain Behavior
 
@@ -70,3 +72,5 @@ The Optimization Plane is implemented as a benchmark-and-promotion loop rather t
 
 - Runtime operations guide: [docs/runtime-operations-guide.md](/Users/manzeem/MindWeave/docs/runtime-operations-guide.md)
 - Determinism, audit, and graph controls: [docs/determinism-audit-and-graph-controls.md](/Users/manzeem/MindWeave/docs/determinism-audit-and-graph-controls.md)
+- Best-effort determinism implementation: [docs/best-effort-determinism-implementation.md](/Users/manzeem/MindWeave/docs/best-effort-determinism-implementation.md)
+- NL graph planner implementation: [docs/nl-graph-planner-implementation.md](/Users/manzeem/MindWeave/docs/nl-graph-planner-implementation.md)

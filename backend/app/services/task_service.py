@@ -19,6 +19,7 @@ from app.models.api import (
     ChangedEvidenceResponse,
     ChangedNodeResponse,
     ChangedPromptResponse,
+    NodeDetailResponse,
     PlanChangeResponse,
     ReasoningTraceResponse,
     RunDiffResponse,
@@ -27,18 +28,26 @@ from app.models.api import (
     TemplateSummary,
 )
 from app.models.runtime import (
+    ApprovalState,
+    ClaimClassification,
     ControlLevel,
+    DelegationPolicy,
     DeterminismMode,
     EvidenceSupportLevel,
     ExecutionLogEntry,
     FindingRecord,
     GraphEdge,
     GraphNodeState,
+    GraphPatchRecord,
     GraphReasoningState,
+    GraphVersionRecord,
     NodeStatus,
+    PatchDiffRecord,
     ReasoningVisibilityTier,
     ReviewDecision,
     TaskStatus,
+    TraceAccessRecord,
+    TraceAccessRole,
     VerificationStatus,
 )
 from app.runtime.audit import AuditStore
@@ -63,6 +72,7 @@ from app.services.runtime_metadata import (
     prompt_hash as compute_prompt_hash,
     reproducibility_hash as compute_reproducibility_hash,
     stable_hash,
+    ui_model_metadata,
 )
 from app.services.schema_service import SchemaService
 from app.services.storage_service import StorageService
@@ -220,11 +230,29 @@ class TaskService:
         record = self._require_record(task_id)
         state = GraphReasoningState.model_validate(record.grs_snapshot)
         state.review_history = self.review_service.list_for_task(task_id)
+        if not state.graph_version_history:
+            self._ensure_initial_graph_version(state)
+            audit_package, _ = self.audit_store.persist_audit_package(state)
+            self._persist_record(state, audit_package)
+            record.audit_package = audit_package
         return self._build_response(state, record.audit_package)
 
     def get_audit_package(self, task_id: str) -> dict:
         record = self._require_record(task_id)
+        state = GraphReasoningState.model_validate(record.grs_snapshot)
+        if not state.graph_version_history:
+            self._ensure_initial_graph_version(state)
+            audit_package, _ = self.audit_store.persist_audit_package(state)
+            self._persist_record(state, audit_package)
+            return audit_package
         return record.audit_package
+
+    def get_node_detail(self, task_id: str, node_id: str) -> NodeDetailResponse:
+        state = GraphReasoningState.model_validate(self._require_record(task_id).grs_snapshot)
+        node = state.nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Node {node_id} not found for task {task_id}.")
+        return self._build_node_detail(state, node)
 
     def list_reviews(self, task_id: str) -> list[ReviewDecision]:
         return self.review_service.list_for_task(task_id)
@@ -361,6 +389,28 @@ class TaskService:
     ) -> TaskRunResponse:
         record = self._require_record(task_id)
         state = GraphReasoningState.model_validate(record.grs_snapshot)
+        self._ensure_initial_graph_version(state)
+        validation = self.validation_bridge.validate_patch(
+            state=state,
+            patch_type=patch_type,
+            target_node_id=target_node_id,
+            payload=payload or {},
+            change_reason=change_reason,
+        )
+        if validation.status != "valid":
+            raise ValueError("; ".join(validation.errors) or "Patch validation failed.")
+        if validation.requires_approval and not approved_by:
+            raise ValueError("This patch requires approval before it can be applied.")
+        if validation.warnings:
+            state.logs.append(
+                ExecutionLogEntry(
+                    event="graph_patch_validated_with_warnings",
+                    message="Graph patch validation completed with warnings.",
+                    node_id=target_node_id,
+                    payload=validation.model_dump(mode="json"),
+                )
+            )
+        before_state = GraphReasoningState.model_validate(state.model_dump(mode="json"))
         patch = self.graph_patch_service.apply(
             state=state,
             patch_type=patch_type,
@@ -379,6 +429,7 @@ class TaskService:
                 payload=patch.model_dump(mode="json"),
             )
         )
+        self._record_patch_governance(state, before_state, patch, requested_by, change_reason)
 
         if auto_rerun:
             if patch.patch_type == "remove_node":
@@ -398,6 +449,44 @@ class TaskService:
         audit_package, _ = self.audit_store.persist_audit_package(state)
         self._persist_record(state, audit_package)
         return self._build_response(state, audit_package)
+
+    def change_node_executor(
+        self,
+        task_id: str,
+        node_id: str,
+        executor_type: str,
+        executor_profile: str | None,
+        max_child_agents: int,
+        max_recursion_depth: int,
+        child_token_budget: int,
+        delegated_summary_required: bool,
+        requested_by: str,
+        approved_by: str | None,
+        change_reason: str,
+        instruction_note: str,
+        auto_rerun: bool,
+    ) -> TaskRunResponse:
+        payload: dict[str, Any] = {
+            "executor_type": executor_type,
+            "max_child_agents": max_child_agents,
+            "max_recursion_depth": max_recursion_depth,
+            "child_token_budget": child_token_budget,
+            "delegated_summary_required": delegated_summary_required,
+        }
+        if executor_profile:
+            payload["executor_profile"] = executor_profile
+        if instruction_note.strip():
+            payload["instruction_note"] = instruction_note.strip()
+        return self.apply_graph_patch(
+            task_id=task_id,
+            patch_type="change_executor",
+            target_node_id=node_id,
+            change_reason=change_reason or f"Change executor for node {node_id}.",
+            requested_by=requested_by,
+            approved_by=approved_by or requested_by,
+            payload=payload,
+            auto_rerun=auto_rerun,
+        )
 
     def plan_change(
         self,
@@ -484,6 +573,20 @@ class TaskService:
             target_node_resolution=intent.resolution,
         )
 
+    def plan_node_change(
+        self,
+        task_id: str,
+        node_id: str,
+        request_text: str,
+        requested_by: str,
+    ) -> PlanChangeResponse:
+        return self.plan_change(
+            task_id=task_id,
+            request_text=request_text,
+            requested_by=requested_by,
+            selected_node_id=node_id,
+        )
+
     def apply_planned_change(
         self,
         task_id: str,
@@ -494,6 +597,7 @@ class TaskService:
     ) -> TaskRunResponse:
         record = self._require_record(task_id)
         state = GraphReasoningState.model_validate(record.grs_snapshot)
+        self._ensure_initial_graph_version(state)
         proposal = next((item for item in state.patch_proposals if item.proposal_id == proposal_id), None)
         if proposal is None:
             raise ValueError(f"Patch proposal {proposal_id} not found.")
@@ -508,6 +612,7 @@ class TaskService:
         intent = next((item for item in state.change_intents if item.intent_id == proposal.intent_id), None)
         applied_patch_ids: list[str] = []
         for patch in proposal.patches:
+            before_state = GraphReasoningState.model_validate(state.model_dump(mode="json"))
             applied = self.graph_patch_service.apply(
                 state=state,
                 patch_type=patch.patch_type,
@@ -519,6 +624,13 @@ class TaskService:
                 auto_rerun=auto_rerun,
             )
             applied_patch_ids.append(applied.patch_id)
+            self._record_patch_governance(
+                state,
+                before_state,
+                applied,
+                intent.requested_by if intent is not None else "planner",
+                patch.change_reason or proposal.summary,
+            )
 
         proposal.status = "applied"
         proposal.approved_by = approved_by
@@ -658,9 +770,16 @@ class TaskService:
             },
         )
 
-    def get_reasoning_trace(self, task_id: str, tier: ReasoningVisibilityTier) -> ReasoningTraceResponse:
+    def get_reasoning_trace(
+        self,
+        task_id: str,
+        tier: ReasoningVisibilityTier,
+        viewer_role: TraceAccessRole = TraceAccessRole.reviewer,
+        viewer_id: str = "anonymous",
+    ) -> ReasoningTraceResponse:
         state = GraphReasoningState.model_validate(self._require_record(task_id).grs_snapshot)
-        effective_tier = self._cap_visibility_tier(state.control_level, tier)
+        self._ensure_initial_graph_version(state)
+        effective_tier = self._cap_visibility_tier_for_role(state.control_level, viewer_role, tier)
         entries: list[dict[str, Any]] = []
 
         ordered_nodes = sorted(
@@ -678,6 +797,7 @@ class TaskService:
                 "status": node.status.value,
                 "evidence_used": [reference.model_dump(mode="json") for reference in node.evidence_refs],
                 "conclusion": node.output.get("conclusion") or node.output.get("summary") or node.subtitle,
+                "claims": self._serialize_claims(node),
             }
             if effective_tier == ReasoningVisibilityTier.summary_trace:
                 entries.append(base_entry)
@@ -705,6 +825,32 @@ class TaskService:
                 }
             )
 
+        state.trace_access_history.append(
+            TraceAccessRecord(
+                task_id=task_id,
+                viewer_id=viewer_id,
+                viewer_role=viewer_role,
+                requested_tier=tier,
+                effective_tier=effective_tier,
+                entry_count=len(entries),
+            )
+        )
+        state.logs.append(
+            ExecutionLogEntry(
+                event="reasoning_trace_viewed",
+                message="Reasoning trace was accessed.",
+                payload={
+                    "viewer_id": viewer_id,
+                    "viewer_role": viewer_role.value,
+                    "requested_tier": tier.value,
+                    "effective_tier": effective_tier.value,
+                    "entry_count": len(entries),
+                },
+            )
+        )
+        audit_package, _ = self.audit_store.persist_audit_package(state)
+        self._persist_record(state, audit_package)
+
         return ReasoningTraceResponse(
             task_id=task_id,
             tier=effective_tier,
@@ -712,6 +858,10 @@ class TaskService:
             metadata={
                 "control_level": state.control_level.value,
                 "requested_tier": tier.value,
+                "effective_tier": effective_tier.value,
+                "viewer_role": viewer_role.value,
+                "viewer_id": viewer_id,
+                "access_count": len(state.trace_access_history),
                 "execution_sequence": state.execution_sequence,
             },
         )
@@ -760,9 +910,14 @@ class TaskService:
                 output_schema_id=node.output_schema_id,
                 priority=node.priority,
                 executor_type=node.executor_type,
+                executor_profile=getattr(node, "executor_profile", None) or node.metadata.get("executor_profile"),
                 max_child_agents=node.max_child_agents,
                 max_recursion_depth=node.max_recursion_depth,
+                child_token_budget=int(getattr(node, "child_token_budget", 0) or node.metadata.get("child_token_budget", 0) or 0),
                 expansion_contracts=node.expansion_contracts,
+                delegated_summary_required=bool(
+                    getattr(node, "delegated_summary_required", False) or node.metadata.get("delegated_summary_required", False)
+                ),
                 required_approvals=node.required_approvals,
                 depends_on=node.depends_on,
                 guarded_by=node.guarded_by,
@@ -801,12 +956,18 @@ class TaskService:
             nodes=nodes,
             edges=edges,
             budget_spec=program.budget,
+            delegation_policy=DelegationPolicy.model_validate(
+                (program.metadata or {}).get("delegation_policy", {})
+                if isinstance(program.metadata, dict)
+                else {}
+            ),
             program_blueprint=program.model_dump(mode="json", by_alias=True),
             output_schema_definition=bundle.output_schema_definition,
         )
         state.execution_env_hash = build_execution_env_hash(self.settings, determinism_mode.value, provider_metadata)
         state.grs_hash = compute_grs_hash(state)
         state.reproducibility_hash = compute_reproducibility_hash(state, provider_metadata)
+        self._ensure_initial_graph_version(state)
         return state
 
     def _persist_record(self, state: GraphReasoningState, audit_package: dict) -> None:
@@ -837,6 +998,209 @@ class TaskService:
         self.audit_store.snapshot(state, label)
         audit_package, _ = self.audit_store.persist_audit_package(state)
         self._persist_record(state, audit_package)
+
+    @staticmethod
+    def _edge_key(edge: GraphEdge) -> str:
+        return f"{edge.source}->{edge.target}:{edge.kind}"
+
+    def _ensure_initial_graph_version(self, state: GraphReasoningState) -> None:
+        if state.graph_version_history:
+            return
+        state.graph_version_history.append(
+            GraphVersionRecord(
+                program_version=state.program_version,
+                blueprint_hash=stable_hash(state.program_blueprint or {}),
+                created_by="system",
+                reason="Initial graph instantiation.",
+            )
+        )
+
+    def _record_patch_governance(
+        self,
+        state: GraphReasoningState,
+        before_state: GraphReasoningState,
+        patch: GraphPatchRecord,
+        requested_by: str,
+        reason: str,
+    ) -> None:
+        self._ensure_initial_graph_version(state)
+        self._ensure_initial_graph_version(before_state)
+        state.patch_diff_history.append(self._build_patch_diff(before_state, state, patch))
+        state.graph_version_history.append(
+            GraphVersionRecord(
+                program_version=state.program_version,
+                blueprint_hash=stable_hash(state.program_blueprint or {}),
+                created_by=requested_by,
+                reason=reason,
+                patch_id=patch.patch_id,
+                parent_program_version=before_state.program_version,
+            )
+        )
+
+    def _build_patch_diff(
+        self,
+        before_state: GraphReasoningState,
+        after_state: GraphReasoningState,
+        patch: GraphPatchRecord,
+    ) -> PatchDiffRecord:
+        before_node_ids = set(before_state.nodes.keys())
+        after_node_ids = set(after_state.nodes.keys())
+        common_node_ids = before_node_ids & after_node_ids
+        changed_nodes = sorted(
+            node_id
+            for node_id in common_node_ids
+            if stable_hash(before_state.nodes[node_id].model_dump(mode="json"))
+            != stable_hash(after_state.nodes[node_id].model_dump(mode="json"))
+        )
+        before_edges = {self._edge_key(edge) for edge in before_state.edges}
+        after_edges = {self._edge_key(edge) for edge in after_state.edges}
+        return PatchDiffRecord(
+            patch_id=patch.patch_id,
+            patch_type=patch.patch_type,
+            before_program_version=before_state.program_version,
+            after_program_version=after_state.program_version,
+            before_blueprint_hash=stable_hash(before_state.program_blueprint or {}),
+            after_blueprint_hash=stable_hash(after_state.program_blueprint or {}),
+            added_nodes=sorted(after_node_ids - before_node_ids),
+            removed_nodes=sorted(before_node_ids - after_node_ids),
+            changed_nodes=changed_nodes,
+            added_edges=sorted(after_edges - before_edges),
+            removed_edges=sorted(before_edges - after_edges),
+            changed_policy=(before_state.program_blueprint or {}).get("policy")
+            != (after_state.program_blueprint or {}).get("policy"),
+            changed_budget=stable_hash(before_state.budget_spec.model_dump(mode="json"))
+            != stable_hash(after_state.budget_spec.model_dump(mode="json")),
+        )
+
+    @staticmethod
+    def _tier_rank(tier: ReasoningVisibilityTier) -> int:
+        ranking = {
+            ReasoningVisibilityTier.summary_trace: 0,
+            ReasoningVisibilityTier.structured_reasoning_trace: 1,
+            ReasoningVisibilityTier.expanded_analytic_trace: 2,
+        }
+        return ranking[tier]
+
+    def _cap_visibility_tier_for_role(
+        self,
+        control_level: ControlLevel,
+        viewer_role: TraceAccessRole,
+        requested_tier: ReasoningVisibilityTier,
+    ) -> ReasoningVisibilityTier:
+        control_cap = self._cap_visibility_tier(control_level, requested_tier)
+        role_cap = {
+            TraceAccessRole.viewer: ReasoningVisibilityTier.summary_trace,
+            TraceAccessRole.reviewer: ReasoningVisibilityTier.structured_reasoning_trace,
+            TraceAccessRole.auditor: ReasoningVisibilityTier.expanded_analytic_trace,
+            TraceAccessRole.admin: ReasoningVisibilityTier.expanded_analytic_trace,
+        }[viewer_role]
+        allowed_rank = min(self._tier_rank(control_cap), self._tier_rank(role_cap), self._tier_rank(requested_tier))
+        ranked_tiers = {
+            0: ReasoningVisibilityTier.summary_trace,
+            1: ReasoningVisibilityTier.structured_reasoning_trace,
+            2: ReasoningVisibilityTier.expanded_analytic_trace,
+        }
+        return ranked_tiers[allowed_rank]
+
+    @staticmethod
+    def _serialize_claims(node: GraphNodeState) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": record.id,
+                "text": record.text,
+                "support_level": record.support_level.value,
+                "claim_classification": record.claim_classification.value,
+                "evidence_refs": [reference.model_dump(mode="json") for reference in record.evidence_refs],
+            }
+            for record in node.finding_records
+        ]
+
+    def _approval_state_for_node(self, state: GraphReasoningState, node: GraphNodeState) -> ApprovalState:
+        requires_human_review = bool(node.metadata.get("requires_human_review")) or node.required_approvals > 0
+        approved_count = self._approved_count(state, node.id)
+        required_approvals = max(node.required_approvals, 1 if requires_human_review else 0)
+        pending_approvals = max(required_approvals - approved_count, 0)
+        if required_approvals == 0:
+            status = "not_required"
+        elif pending_approvals == 0:
+            status = "approved"
+        elif approved_count > 0:
+            status = "partially_approved"
+        else:
+            status = "pending"
+        return ApprovalState(
+            required_approvals=required_approvals,
+            approved_count=approved_count,
+            pending_approvals=pending_approvals,
+            requires_human_review=requires_human_review,
+            status=status,
+        )
+
+    @staticmethod
+    def _key_conclusion_for_node(node: GraphNodeState) -> str:
+        for candidate in (
+            node.output.get("conclusion"),
+            node.output.get("summary"),
+            node.thought_summary,
+            node.subtitle,
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    @staticmethod
+    def _patch_history_for_node(state: GraphReasoningState, node_id: str) -> list[GraphPatchRecord]:
+        history: list[GraphPatchRecord] = []
+        for patch in state.graph_patch_history:
+            if patch.target_node_id == node_id:
+                history.append(patch)
+                continue
+            raw_node = patch.payload.get("node", {}) if isinstance(patch.payload, dict) else {}
+            if isinstance(raw_node, dict) and str(raw_node.get("id") or "") == node_id:
+                history.append(patch)
+        return history
+
+    def _prepared_node(self, state: GraphReasoningState, node: GraphNodeState) -> GraphNodeState:
+        prepared = GraphNodeState.model_validate(node.model_dump(mode="json"))
+        if not prepared.executor_profile:
+            prepared.executor_profile = node.metadata.get("executor_profile")
+        if not prepared.thought_summary:
+            thought = state.thoughts.get(f"thought_{node.id}")
+            prepared.thought_summary = thought.summary if thought is not None else node.subtitle
+        if not prepared.verification_checks:
+            for entry in reversed(state.verification_logs):
+                if entry.node_id == node.id:
+                    prepared.verification_checks = list(entry.checks)
+                    break
+        prepared.approval_state = self._approval_state_for_node(state, node)
+        if not prepared.delegated_children:
+            prepared.delegated_children = list(node.metadata.get("spawned_child_ids", []))
+        prepared.patch_history = [patch.patch_id for patch in self._patch_history_for_node(state, node.id)]
+        prepared.model_metadata = ui_model_metadata(node.model_metadata)
+        return prepared
+
+    def _build_node_detail(self, state: GraphReasoningState, node: GraphNodeState) -> NodeDetailResponse:
+        prepared = self._prepared_node(state, node)
+        patch_history = self._patch_history_for_node(state, node.id)
+        return NodeDetailResponse(
+            task_id=state.task_id,
+            node=prepared,
+            key_conclusion=self._key_conclusion_for_node(prepared),
+            evidence_count=len(prepared.evidence_refs),
+            top_evidence=prepared.evidence_refs[:3],
+            finding_records=prepared.finding_records,
+            approval_state=prepared.approval_state,
+            delegated_children=prepared.delegated_children,
+            delegated_summaries=list(node.metadata.get("delegated_summaries", [])),
+            patch_history=patch_history,
+            technical_details={
+                "inputs": node.inputs,
+                "output": node.output,
+                "verification_checks": prepared.verification_checks,
+                "model_metadata": ui_model_metadata(node.model_metadata),
+                "evidence_scope": node.evidence_scope,
+            },
+        )
 
     @staticmethod
     def _normalize_final_output(state: GraphReasoningState) -> dict[str, Any]:
@@ -909,6 +1273,11 @@ class TaskService:
                         id=f"finding_{index + 1}",
                         text=finding,
                         support_level=support_level,
+                        claim_classification=(
+                            ClaimClassification.grounded
+                            if support_level == EvidenceSupportLevel.direct
+                            else ClaimClassification.inferred
+                        ),
                         evidence_refs=matching_refs,
                     ).model_dump(mode="json")
                 )
@@ -918,10 +1287,9 @@ class TaskService:
                 normalized[key] = value
         return normalized
 
-    @staticmethod
-    def _build_response(state: GraphReasoningState, audit_package: dict | None = None) -> TaskRunResponse:
+    def _build_response(self, state: GraphReasoningState, audit_package: dict | None = None) -> TaskRunResponse:
         ordered_nodes = sorted(
-            state.nodes.values(),
+            (self._prepared_node(state, node) for node in state.nodes.values()),
             key=lambda node: (
                 node.metadata.get("layout", {}).get("row", 999),
                 node.metadata.get("layout", {}).get("column", 999),
@@ -958,6 +1326,9 @@ class TaskService:
             evidence_graph_edges=state.evidence_graph_edges,
             prompt_traces=state.prompt_traces,
             graph_patch_history=state.graph_patch_history,
+            graph_version_history=state.graph_version_history,
+            patch_diff_history=state.patch_diff_history,
+            trace_access_history=state.trace_access_history,
             program_blueprint=state.program_blueprint,
             output_schema_definition=state.output_schema_definition,
             final_output=state.final_output,

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { FileChartColumn, UserRound } from "lucide-react";
 
 interface HeaderBarProps {
@@ -5,9 +6,10 @@ interface HeaderBarProps {
   pageEyebrow: string;
   summaryOpen: boolean;
   onToggleSummary: () => void;
+  contextActions?: ReactNode;
 }
 
-export function HeaderBar({ pageTitle, pageEyebrow, summaryOpen, onToggleSummary }: HeaderBarProps) {
+export function HeaderBar({ pageTitle, pageEyebrow, summaryOpen, onToggleSummary, contextActions }: HeaderBarProps) {
   return (
     <header className="flex items-center justify-between border-b border-[var(--mw-border)] px-5 py-4 lg:px-6">
       <div className="flex min-w-0 items-center gap-6">
@@ -22,6 +24,7 @@ export function HeaderBar({ pageTitle, pageEyebrow, summaryOpen, onToggleSummary
       </div>
 
       <div className="flex items-center gap-2.5">
+        {contextActions}
         <button
           type="button"
           onClick={onToggleSummary}

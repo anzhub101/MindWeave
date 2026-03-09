@@ -12,7 +12,6 @@ import {
   Circle,
   FileText,
   Minus,
-  Move,
   Plus,
   RotateCcw,
   ShieldCheck,
@@ -22,7 +21,7 @@ import type { GraphEdge, GraphNode } from "../types";
 
 const CANVAS_WIDTH = 1280;
 const CARD_WIDTH = 188;
-const CARD_HEIGHT = 132;
+const CARD_HEIGHT = 146;
 const TOP_OFFSET = 44;
 const ROW_GAP = 170;
 const COLUMN_X: Record<number, number> = {
@@ -77,6 +76,27 @@ function humanizeBranch(kind: string) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function executorLabel(executorType: string | undefined) {
+  if (executorType === "agent_operator") {
+    return "Agent";
+  }
+  if (executorType === "tool_operator") {
+    return "Tool";
+  }
+  if (executorType === "human_operator") {
+    return "Human";
+  }
+  return "LLM";
+}
+
+function approvalRequired(node: GraphNode) {
+  return Boolean(node.approval_state?.requires_human_review || (node.required_approvals ?? 0) > 0);
+}
+
+function delegatedCount(node: GraphNode) {
+  return node.delegated_children?.length ?? 0;
 }
 
 function statusTone(node: GraphNode, active: boolean) {
@@ -250,14 +270,11 @@ export function GraphCanvas({
       if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) {
         nodeDragRef.current.moved = true;
       }
-      // Inside handleCanvasPointerMove (around line 133)
       setNodePositions((current) => ({
         ...current,
         [nodeDragRef.current.nodeId as string]: {
-          // Keep the horizontal clamp
           x: clamp(nodeDragRef.current.originX + deltaX, 24, CANVAS_WIDTH - CARD_WIDTH - 24),
-          // Remove the bottom limit, only enforce the top 24px margin
-          y: Math.max(24, nodeDragRef.current.originY + deltaY), 
+          y: Math.max(24, nodeDragRef.current.originY + deltaY),
         },
       }));
       return;
@@ -462,17 +479,37 @@ export function GraphCanvas({
                   <div className="font-serif text-[19px] leading-[1.05] tracking-[0.01em] text-[var(--mw-text)]">
                     {node.title}
                   </div>
-                  <div className="mt-1.5 text-[12px] leading-5 text-[var(--mw-muted)]">{node.subtitle}</div>
+                  <div className="mt-1.5 line-clamp-2 text-[12px] leading-5 text-[var(--mw-muted)]">
+                    {node.subtitle}
+                  </div>
 
-                  <div className="mt-auto flex items-center justify-between border-t border-[var(--mw-border)] pt-2.5 text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">
+                  <div className="mt-3 flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">
+                    <span className="flex items-center gap-1">
+                      <FileText size={12} strokeWidth={1.6} />
+                      {node.evidence_refs.length}
+                    </span>
                     <span>{node.status}</span>
-                    <div className="flex items-center gap-3">
-                      <span>{node.latency_ms ? `${(node.latency_ms / 1000).toFixed(1)}s` : "--"}</span>
-                      <span className="flex items-center gap-1">
-                        <FileText size={12} strokeWidth={1.6} />
-                        {node.evidence_refs.length}
+                  </div>
+
+                  <div className="mt-auto flex flex-wrap gap-1.5 border-t border-[var(--mw-border)] pt-2.5">
+                    <span className="rounded-full border border-[var(--mw-border)] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--mw-text)]">
+                      {executorLabel(node.executor_type)}
+                    </span>
+                    {approvalRequired(node) ? (
+                      <span className="rounded-full border border-[var(--mw-border)] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--mw-text)]">
+                        Approval
                       </span>
-                    </div>
+                    ) : null}
+                    {(node.expansion_contracts ?? []).includes("expand_subgraph") ? (
+                      <span className="rounded-full border border-[var(--mw-border)] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--mw-text)]">
+                        Expanded
+                      </span>
+                    ) : null}
+                    {delegatedCount(node) > 0 ? (
+                      <span className="rounded-full border border-[var(--mw-border)] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--mw-text)]">
+                        Delegated {delegatedCount(node)}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
               </motion.button>
