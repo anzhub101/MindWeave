@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     strict_disable_dynamic_batching: bool = True
     strict_parallelism: int = 1
     strict_local_endpoint: str = "local://mindweave-strict"
+    web_search_enabled: bool = True
+    web_search_backend: str = "mcp"
+    web_search_transport_fallback: str = "api"
+    web_search_top_k: int = 5
+    web_search_timeout_seconds: float = 20.0
+    brave_api_key: str | None = None
+    brave_search_url: str = "https://api.search.brave.com/res/v1/web/search"
+    brave_mcp_command: str | None = "npx -y brave-search-mcp"
+    brave_mcp_tool_name: str | None = None
     vector_backend: str = "local"
     pinecone_api_key: str | None = None
     pinecone_index_name: str = "mindweave-knowledge"
@@ -73,6 +82,14 @@ class Settings(BaseSettings):
     @property
     def resolved_pinecone_api_key(self) -> str | None:
         return self.pinecone_api_key or os.getenv("PINECONE_API_KEY")
+
+    @property
+    def resolved_brave_api_key(self) -> str | None:
+        return self.brave_api_key or os.getenv("BRAVE_API_KEY")
+
+    @property
+    def resolved_k2_api_key(self) -> str | None:
+        return self.k2_api_key or os.getenv("K2_API_KEY")
 
     @property
     def resolved_supabase_key(self) -> str | None:

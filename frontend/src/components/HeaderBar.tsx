@@ -17,7 +17,7 @@ export function HeaderBar({ pageTitle, pageEyebrow, summaryOpen, onToggleSummary
           <div className="text-[11px] font-medium uppercase tracking-[0.26em] text-[var(--mw-accent)]">
             {pageEyebrow}
           </div>
-          <div className="mt-1 font-serif text-[32px] leading-none tracking-[-0.035em] text-[var(--mw-text)]">
+          <div className="mt-1 font-sans text-[32px] font-semibold leading-none tracking-[-0.035em] text-[var(--mw-text)]">
             {pageTitle}
           </div>
         </div>

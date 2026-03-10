@@ -5,9 +5,15 @@ from typing import Any
 
 from app.models.runtime import GraphNodeState, GraphReasoningState
 from app.services.knowledge_base import KnowledgeBase
+from app.services.skill_service import SkillService
+from app.services.web_search_service import WebSearchService
 
 
 class ToolRuntime:
+    def __init__(self, skill_service: SkillService | None = None) -> None:
+        self.web_search = WebSearchService()
+        self.skill_service = skill_service
+
     def execute(
         self,
         tool_spec: dict[str, Any],
@@ -50,13 +56,43 @@ class ToolRuntime:
                 ],
             }
 
+        if tool_name == "web_search":
+            query = str(args.get("query", f"{state.prompt} {node.title}")).strip()
+            top_k = int(args.get("top_k", 4))
+            results = self.web_search.search(query, top_k=top_k)
+            return {
+                "tool": "web_search",
+                "query": query,
+                "provider": self.web_search.settings.web_search_backend,
+                "results": [
+                    result.model_dump(mode="json")
+                    for result in results
+                ],
+            }
+
+        if tool_name == "skill":
+            skill_id = str(args.get("skill_artifact_id", "")).strip()
+            if not skill_id:
+                return {"tool": "skill", "error": "Missing skill_artifact_id."}
+            if self.skill_service is None:
+                return {"tool": "skill", "error": "Skill service is unavailable."}
+            input_payload = args.get("input_payload", {}) if isinstance(args.get("input_payload"), dict) else {}
+            return {
+                "tool": "skill",
+                "skill_artifact_id": skill_id,
+                "result": self.skill_service.run_skill_artifact(skill_id, input_payload=input_payload),
+            }
+
         if tool_name == "dependency_extract":
             dependency_id = str(args.get("dependency_id", ""))
             path = str(args.get("path", ""))
             dependency_output = node.inputs.get(dependency_id, {})
+            extracted = self._get_path_value(dependency_output, path)
+            if extracted is None and isinstance(dependency_output, dict) and "output" in dependency_output:
+                extracted = self._get_path_value(dependency_output.get("output", {}), path)
             return {
                 "tool": "dependency_extract",
-                "value": self._get_path_value(dependency_output, path),
+                "value": extracted,
             }
 
         return {"tool": tool_name or "unknown", "error": "Unsupported tool."}

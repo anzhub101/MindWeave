@@ -11,6 +11,7 @@ import {
   ScrollText,
   Settings2,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 import type {
   ControlLevel,
@@ -39,6 +40,9 @@ interface OperationsViewProps {
   onSelectTask: (taskId: string) => Promise<void>;
   onReplayTask: () => Promise<void>;
   onNavigateReasoning: () => void;
+  onCreateGraph: () => void;
+  onDeleteTask: (taskId: string) => Promise<void>;
+  deletingTaskId: string | null;
 }
 
 function humanize(value: string) {
@@ -87,7 +91,7 @@ function Panel({
         </div>
         <div>
           <div className="text-[10px] uppercase tracking-[0.24em] text-[var(--mw-subtle)]">{eyebrow}</div>
-          <div className="mt-1 font-serif text-[24px] leading-none text-[var(--mw-text)]">{title}</div>
+          <div className="mt-1 font-sans text-[24px] font-semibold leading-none text-[var(--mw-text)]">{title}</div>
         </div>
       </div>
       <div className="mt-5">{children}</div>
@@ -108,7 +112,7 @@ function EmptyState({
 }) {
   return (
     <div className="rounded-[20px] border border-[var(--mw-border)] bg-[var(--mw-panel)] p-6">
-      <div className="font-serif text-[24px] text-[var(--mw-text)]">{title}</div>
+      <div className="font-sans text-[24px] font-semibold text-[var(--mw-text)]">{title}</div>
       <div className="mt-2 max-w-2xl text-[14px] leading-7 text-[var(--mw-muted)]">{body}</div>
       <button
         type="button"
@@ -146,9 +150,10 @@ function DashboardView({
   notice,
   onSelectTask,
   onNavigateReasoning,
+  onCreateGraph,
 }: Pick<
   OperationsViewProps,
-  "task" | "history" | "offlineDemo" | "notice" | "onSelectTask" | "onNavigateReasoning"
+  "task" | "history" | "offlineDemo" | "notice" | "onSelectTask" | "onNavigateReasoning" | "onCreateGraph"
 >) {
   const evidenceNodeCount = Object.keys(task.evidence_graph_nodes ?? {}).length;
   const promptTraceCount = task.prompt_traces?.length ?? 0;
@@ -171,29 +176,39 @@ function DashboardView({
             <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
                 <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">Nodes</div>
-                <div className="mt-3 font-serif text-[34px] leading-none text-[var(--mw-text)]">{task.nodes.length}</div>
+                <div className="mt-3 font-sans text-[34px] font-semibold leading-none text-[var(--mw-text)]">{task.nodes.length}</div>
               </div>
               <div className="rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
                 <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">Evidence Graph</div>
-                <div className="mt-3 font-serif text-[34px] leading-none text-[var(--mw-text)]">{evidenceNodeCount}</div>
+                <div className="mt-3 font-sans text-[34px] font-semibold leading-none text-[var(--mw-text)]">{evidenceNodeCount}</div>
               </div>
               <div className="rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
                 <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">Prompt Traces</div>
-                <div className="mt-3 font-serif text-[34px] leading-none text-[var(--mw-text)]">{promptTraceCount}</div>
+                <div className="mt-3 font-sans text-[34px] font-semibold leading-none text-[var(--mw-text)]">{promptTraceCount}</div>
               </div>
               <div className="rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
                 <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">Graph Patches</div>
-                <div className="mt-3 font-serif text-[34px] leading-none text-[var(--mw-text)]">{patchCount}</div>
+                <div className="mt-3 font-sans text-[34px] font-semibold leading-none text-[var(--mw-text)]">{patchCount}</div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={onNavigateReasoning}
-              className="mt-5 inline-flex items-center gap-2 rounded-full border border-[var(--mw-border)] bg-[var(--mw-node)] px-4 py-2 text-[12px] uppercase tracking-[0.18em] text-[var(--mw-text)] transition hover:border-[var(--mw-accent)]"
-            >
-              Open Reasoning Workspace
-              <Orbit size={14} />
-            </button>
+            <div className="mt-5 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={onCreateGraph}
+                className="inline-flex items-center gap-2 rounded-full border border-[var(--mw-accent)] bg-[var(--mw-accent-soft)] px-4 py-2 text-[12px] uppercase tracking-[0.18em] text-[var(--mw-text)] transition hover:border-[var(--mw-text)]"
+              >
+                Create A Graph
+                <Orbit size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={onNavigateReasoning}
+                className="inline-flex items-center gap-2 rounded-full border border-[var(--mw-border)] bg-[var(--mw-node)] px-4 py-2 text-[12px] uppercase tracking-[0.18em] text-[var(--mw-text)] transition hover:border-[var(--mw-accent)]"
+              >
+                Open Reasoning Workspace
+                <ArrowRight size={14} />
+              </button>
+            </div>
           </div>
 
           <div className="rounded-[20px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
@@ -275,9 +290,19 @@ function HistoryView({
   notice,
   onSelectTask,
   onReplayTask,
+  onDeleteTask,
+  deletingTaskId,
 }: Pick<
   OperationsViewProps,
-  "task" | "history" | "isLoadingTask" | "isReplayingTask" | "notice" | "onSelectTask" | "onReplayTask"
+  | "task"
+  | "history"
+  | "isLoadingTask"
+  | "isReplayingTask"
+  | "notice"
+  | "onSelectTask"
+  | "onReplayTask"
+  | "onDeleteTask"
+  | "deletingTaskId"
 >) {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4 pt-4">
@@ -328,6 +353,17 @@ function HistoryView({
                     >
                       {item.task_id === task.task_id ? "Current Run" : isLoadingTask ? "Loading..." : "Open Run"}
                     </button>
+                    {item.task_id !== task.task_id ? (
+                      <button
+                        type="button"
+                        onClick={() => void onDeleteTask(item.task_id)}
+                        disabled={deletingTaskId === item.task_id}
+                        className="inline-flex items-center gap-2 rounded-full border border-[rgba(190,111,93,0.26)] bg-[rgba(190,111,93,0.08)] px-4 py-2 text-[12px] uppercase tracking-[0.18em] text-[var(--mw-text)] transition hover:border-[var(--mw-danger)] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Trash2 size={13} />
+                        {deletingTaskId === item.task_id ? "Deleting..." : "Delete"}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -365,7 +401,7 @@ function AuditView({ task, notice }: Pick<OperationsViewProps, "task" | "notice"
                       <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">
                         {humanize(trace.phase)}{trace.node_id ? ` · ${humanize(trace.node_id)}` : ""}
                       </div>
-                      <div className="mt-1 font-serif text-[18px] text-[var(--mw-text)]">
+                      <div className="mt-1 font-sans text-[18px] font-semibold text-[var(--mw-text)]">
                         {trace.model_version || trace.model_id}
                       </div>
                     </div>
@@ -411,13 +447,13 @@ function AuditView({ task, notice }: Pick<OperationsViewProps, "task" | "notice"
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
               <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">Graph Nodes</div>
-              <div className="mt-3 font-serif text-[30px] leading-none text-[var(--mw-text)]">
+              <div className="mt-3 font-sans text-[30px] font-semibold leading-none text-[var(--mw-text)]">
                 {Object.keys(task.evidence_graph_nodes ?? {}).length}
               </div>
             </div>
             <div className="rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
               <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">Graph Edges</div>
-              <div className="mt-3 font-serif text-[30px] leading-none text-[var(--mw-text)]">{evidenceEdges.length}</div>
+              <div className="mt-3 font-sans text-[30px] font-semibold leading-none text-[var(--mw-text)]">{evidenceEdges.length}</div>
             </div>
           </div>
           <div className="mt-4 space-y-2">
@@ -556,7 +592,7 @@ function TemplatesView({
         <div className="mt-5 grid gap-3 xl:grid-cols-2">
           <div className="rounded-[20px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
             <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--mw-subtle)]">Active Program</div>
-            <div className="mt-3 font-serif text-[22px] text-[var(--mw-text)]">{task.program_id}</div>
+            <div className="mt-3 font-sans text-[22px] font-semibold text-[var(--mw-text)]">{task.program_id}</div>
             <div className="mt-2 text-[13px] leading-6 text-[var(--mw-muted)]">
               Template: {task.template_id}<br />
               Version: {task.program_version}<br />
@@ -585,7 +621,7 @@ function TemplatesView({
                       : "border-[var(--mw-border)] bg-[var(--mw-node)]"
                   }`}
                 >
-                  <div className="font-serif text-[20px] text-[var(--mw-text)]">{template.name}</div>
+                  <div className="font-sans text-[20px] font-semibold text-[var(--mw-text)]">{template.name}</div>
                   <div className="mt-2 text-[13px] leading-6 text-[var(--mw-muted)]">{template.description}</div>
                   <div className="mt-3 font-mono text-[11px] text-[var(--mw-subtle)]">{template.template_id}</div>
                 </div>
@@ -694,6 +730,7 @@ export function OperationsView(props: OperationsViewProps) {
         notice={props.notice}
         onSelectTask={props.onSelectTask}
         onNavigateReasoning={props.onNavigateReasoning}
+        onCreateGraph={props.onCreateGraph}
       />
     );
   }
@@ -708,6 +745,8 @@ export function OperationsView(props: OperationsViewProps) {
         notice={props.notice}
         onSelectTask={props.onSelectTask}
         onReplayTask={props.onReplayTask}
+        onDeleteTask={props.onDeleteTask}
+        deletingTaskId={props.deletingTaskId}
       />
     );
   }

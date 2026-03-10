@@ -15,9 +15,9 @@ const config = {
             },
             fontFamily: {
                 sans: ["Inter", "ui-sans-serif", "system-ui"],
-                serif: ["Newsreader", "ui-serif", "Georgia"],
+                serif: ["Inter", "ui-sans-serif", "system-ui"],
                 handwritten: ["Inter", "ui-sans-serif", "system-ui"],
-                mono: ["IBM Plex Mono", "ui-monospace", "SFMono-Regular"],
+                mono: ["Fira Code", "ui-monospace", "SFMono-Regular"],
             },
             boxShadow: {
                 panel: "0 24px 80px rgba(0, 0, 0, 0.45)",

@@ -44,7 +44,7 @@ export function SummaryCard({
           <div className="text-[11px] font-medium uppercase tracking-[0.26em] text-[var(--mw-accent)]">
             Run Summary
           </div>
-          <div className="mt-2 font-serif text-[30px] leading-[0.96] tracking-[-0.03em] text-[var(--mw-text)] lg:text-[38px]">
+          <div className="mt-2 font-sans text-[30px] font-semibold leading-[0.96] tracking-[-0.03em] text-[var(--mw-text)] lg:text-[38px]">
             {summary?.headline ?? "Human Review Required"}
           </div>
         </div>
@@ -76,7 +76,7 @@ export function SummaryCard({
                   <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--mw-subtle)]">
                     {metric.label}
                   </div>
-                  <div className="mt-3 font-serif text-[28px] leading-none text-[var(--mw-text)]">
+                  <div className="mt-3 font-sans text-[28px] font-semibold leading-none text-[var(--mw-text)]">
                     {metric.value}
                   </div>
                 </div>

@@ -8,6 +8,7 @@ from app.db.models import EmbeddingRecord
 from app.models.artifacts import RegistryArtifact
 from app.models.runtime import ReviewDecision, TaskStatus
 from app.services.artifact_registry_service import ArtifactRegistryService
+from app.services.llm_gateway import MockProvider
 from app.services.optimization_service import OptimizationService
 from app.services.task_service import TaskService
 from app.models.api import OptimizationProfileRequest, OptimizationRunRequest
@@ -18,6 +19,10 @@ def _session_factory(tmp_path):
     engine = create_engine(database_url, connect_args={"check_same_thread": False}, future=True)
     Base.metadata.create_all(bind=engine)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+def _use_mock_llm(service: TaskService) -> None:
+    service.llm_gateway.provider = MockProvider()
 
 
 def test_artifact_registry_supports_versioning_and_promotion(tmp_path) -> None:
@@ -57,6 +62,7 @@ def test_task_service_pauses_for_review_and_resumes(tmp_path) -> None:
     SessionLocal = _session_factory(tmp_path)
     with SessionLocal() as db:
         service = TaskService(db)
+        _use_mock_llm(service)
         paused = asyncio.run(
             service.execute_task(
                 prompt="Perform a financial audit for Invisium FY2026",
@@ -90,6 +96,7 @@ def test_runtime_meets_local_performance_targets(tmp_path) -> None:
     SessionLocal = _session_factory(tmp_path)
     with SessionLocal() as db:
         service = TaskService(db)
+        _use_mock_llm(service)
         result = asyncio.run(
             service.execute_task(
                 prompt="Perform a financial audit for Invisium FY2026",
@@ -109,6 +116,7 @@ def test_task_service_registers_node_schemas_and_validation_logs(tmp_path) -> No
     SessionLocal = _session_factory(tmp_path)
     with SessionLocal() as db:
         service = TaskService(db)
+        _use_mock_llm(service)
         result = asyncio.run(
             service.execute_task(
                 prompt="Perform a financial audit for Invisium FY2026",

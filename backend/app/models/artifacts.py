@@ -16,6 +16,26 @@ class BudgetSpec(BaseModel):
     max_runtime_seconds: int
 
 
+class AgentToolSpec(BaseModel):
+    name: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentModelSpec(BaseModel):
+    model_id: str | None = None
+    model_version: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+
+
+class AgentSpec(BaseModel):
+    persona: str = ""
+    instruction: str = ""
+    context: dict[str, Any] = Field(default_factory=dict)
+    tools: list[AgentToolSpec] = Field(default_factory=list)
+    model: AgentModelSpec | None = None
+
+
 class NodeSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -30,8 +50,12 @@ class NodeSpec(BaseModel):
     output_schema_id: str | None = None
     priority: int = 100
     executor_type: str = "llm_operator"
+    executor_profile: str | None = None
+    agent_spec: AgentSpec | None = None
     max_child_agents: int = 0
     max_recursion_depth: int = 0
+    child_token_budget: int = 0
+    delegated_summary_required: bool = False
     expansion_contracts: list[str] = Field(default_factory=list)
     required_approvals: int = 0
     depends_on: list[str] = Field(default_factory=list)

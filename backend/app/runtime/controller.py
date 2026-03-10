@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from time import perf_counter
 
@@ -23,6 +24,7 @@ from app.runtime.constraints import ConstraintInjector
 from app.runtime.scheduler import Scheduler
 from app.services.convergence import ConvergenceService
 from app.services.evaluation_service import EvaluationService
+from app.services.graph_patch_service import GraphPatchService
 from app.services.schema_service import SchemaService
 
 
@@ -48,6 +50,7 @@ class Controller:
         evaluation_service: EvaluationService | None = None,
         schema_service: SchemaService | None = None,
         cache_service=None,
+        graph_patch_service: GraphPatchService | None = None,
         auto_approve_human_review: bool = True,
     ) -> None:
         self.scheduler = scheduler
@@ -59,6 +62,7 @@ class Controller:
         self.evaluation_service = evaluation_service or EvaluationService()
         self.schema_service = schema_service or SchemaService()
         self.cache_service = cache_service
+        self.graph_patch_service = graph_patch_service or GraphPatchService()
         self.auto_approve_human_review = auto_approve_human_review
         self.execution_cache: dict[str, object] = {}
 
@@ -137,7 +141,7 @@ class Controller:
         node.status = NodeStatus.running
         node.started_at = utcnow()
         node.inputs = {
-            dependency_id: state.nodes[dependency_id].output for dependency_id in node.depends_on
+            dependency_id: self._dependency_snapshot(state.nodes[dependency_id]) for dependency_id in node.depends_on
         }
         input_validation = self.schema_service.validate_node_inputs(state, node)
         if input_validation is not None:
@@ -170,6 +174,7 @@ class Controller:
         node.evidence_refs = result.evidence_refs
         node.finding_records = result.finding_records
         node.thought_summary = result.thought_summary or node.subtitle
+        node.reasoning_trace = result.reasoning_trace
         node.verification_status = result.verification_status
         node.verification_checks = result.verification_checks
         node.model_metadata = result.model_metadata
@@ -292,6 +297,9 @@ class Controller:
                 {"parent_node_id": parent.id},
             )
 
+        if result.graph_delta is not None:
+            self._apply_graph_delta(state, node, result.graph_delta)
+
         if not result.cache_hit:
             self.budget_manager.record_tokens(state, result.llm_usage_tokens)
             self._log(
@@ -299,13 +307,15 @@ class Controller:
                 "node_completed",
                 f"Completed node {node.id}.",
                 node.id,
-            {
-                **result.output,
-                "cache_hit": result.cache_hit,
-                "tool_calls": result.tool_calls,
-                "evaluation_passed": evaluation_passed,
-            },
-        )
+                {
+                    **result.output,
+                    "reasoning_trace": result.reasoning_trace,
+                    "cache_hit": result.cache_hit,
+                    "graph_delta": result.graph_delta.model_dump(mode="json") if result.graph_delta is not None else None,
+                    "tool_calls": result.tool_calls,
+                    "evaluation_passed": evaluation_passed,
+                },
+            )
 
     @staticmethod
     def _approved_count(state: GraphReasoningState, node_id: str) -> int:
@@ -386,6 +396,73 @@ class Controller:
                     )
                 )
 
+    def _apply_graph_delta(self, state: GraphReasoningState, node: GraphNodeState, graph_delta) -> None:
+        allowed_patch_types = {
+            "add_node",
+            "insert_node_between",
+            "rewire_dependency",
+            "change_evidence_scope",
+            "change_executor",
+            "expand_node",
+        }
+        applied_operations = []
+        requested_by = f"runtime:{node.id}"
+        approved_by = "runtime:system"
+
+        for operation in graph_delta.operations:
+            patch_type = operation.patch_type.strip().lower()
+            if patch_type not in allowed_patch_types:
+                self._log(
+                    state,
+                    "runtime_graph_delta_rejected",
+                    f"Rejected unsupported runtime patch type {patch_type}.",
+                    node.id,
+                    {"graph_delta_id": graph_delta.delta_id, "patch_type": patch_type},
+                )
+                continue
+            try:
+                self.graph_patch_service.apply(
+                    state,
+                    patch_type=patch_type,
+                    target_node_id=operation.target_node_id,
+                    change_reason=operation.change_reason or f"Runtime graph delta requested by {node.id}.",
+                    requested_by=requested_by,
+                    approved_by=approved_by,
+                    payload=operation.payload,
+                    auto_rerun=operation.auto_rerun,
+                )
+                applied_operations.append(operation)
+            except Exception as exc:
+                self._log(
+                    state,
+                    "runtime_graph_delta_failed",
+                    str(exc),
+                    node.id,
+                    {
+                        "graph_delta_id": graph_delta.delta_id,
+                        "patch_type": patch_type,
+                        "target_node_id": operation.target_node_id,
+                    },
+                )
+
+        if not applied_operations:
+            return
+
+        applied_delta = graph_delta.model_copy(update={"operations": applied_operations, "source_node_id": node.id})
+        state.runtime_graph_deltas.append(applied_delta)
+        self.budget_manager.update_runtime(state)
+        self._log(
+            state,
+            "runtime_graph_delta_applied",
+            applied_delta.summary or f"Applied runtime graph delta from {node.id}.",
+            node.id,
+            {
+                "graph_delta_id": applied_delta.delta_id,
+                "operation_count": len(applied_operations),
+                "patch_types": [operation.patch_type for operation in applied_operations],
+            },
+        )
+
     @staticmethod
     def _log(
         state: GraphReasoningState,
@@ -402,3 +479,18 @@ class Controller:
                 payload=payload or {},
             )
         )
+
+    @staticmethod
+    def _dependency_snapshot(node: GraphNodeState) -> dict:
+        return {
+            "output": deepcopy(node.output),
+            "thought_summary": node.thought_summary,
+            "reasoning_trace": node.reasoning_trace,
+            "finding_records": [record.model_dump(mode="json") for record in node.finding_records],
+            "evidence_refs": [reference.model_dump(mode="json") for reference in node.evidence_refs],
+            "verification_status": node.verification_status.value,
+            "verification_checks": list(node.verification_checks),
+            "status": node.status.value,
+            "model_metadata": deepcopy(node.model_metadata),
+            "delegated_children": list(node.delegated_children),
+        }

@@ -10,7 +10,7 @@ from jsonschema import validate
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import TaskRunRecord
+from app.db.models import EmbeddingRecord, ReviewDecisionRecord, TaskRunRecord
 from app.change_planning.intent_models import PatchProposal
 from app.change_planning.intent_parser import IntentParserService
 from app.change_planning.patch_planner import PatchPlannerService
@@ -19,10 +19,15 @@ from app.models.api import (
     ChangedEvidenceResponse,
     ChangedNodeResponse,
     ChangedPromptResponse,
+    DeleteTaskResponse,
     NodeDetailResponse,
+    NodeChatResponse,
     PlanChangeResponse,
     ReasoningTraceResponse,
     RunDiffResponse,
+    SkillArtifactResponse,
+    SkillSummary,
+    SkillTestResponse,
     TaskRunListItem,
     TaskRunResponse,
     TemplateSummary,
@@ -42,9 +47,11 @@ from app.models.runtime import (
     GraphReasoningState,
     GraphVersionRecord,
     NodeStatus,
+    PlannerTrace,
     PatchDiffRecord,
     ReasoningVisibilityTier,
     ReviewDecision,
+    VerificationLogEntry,
     TaskStatus,
     TraceAccessRecord,
     TraceAccessRole,
@@ -64,10 +71,12 @@ from app.services.graph_patch_service import GraphPatchService
 from app.services.knowledge_base import KnowledgeBase
 from app.services.llm_gateway import LLMGateway
 from app.services.node_cache import NodeCacheService
+from app.services.node_chat_service import NodeChatService
 from app.services.program_synthesizer import ProgramSynthesisService
 from app.services.review_service import ReviewService
 from app.services.runtime_metadata import (
     build_execution_env_hash,
+    canonicalize_for_hashing,
     grs_hash as compute_grs_hash,
     prompt_hash as compute_prompt_hash,
     reproducibility_hash as compute_reproducibility_hash,
@@ -76,6 +85,7 @@ from app.services.runtime_metadata import (
 )
 from app.services.schema_service import SchemaService
 from app.services.storage_service import StorageService
+from app.services.skill_service import SkillService
 from app.services.tool_runtime import ToolRuntime
 from app.services.vector_store import VectorStore
 
@@ -94,16 +104,22 @@ class TaskService:
         self.audit_store = AuditStore(self.settings.storage_root, storage_service=self.storage_service)
         self.program_synthesizer = ProgramSynthesisService(self.llm_gateway)
         self.artifact_registry = ArtifactRegistryService(db)
+        self.skill_service = SkillService(self.artifact_registry, self.llm_gateway)
         self.review_service = ReviewService(db)
         self.cache_service = NodeCacheService(db)
         self.vector_store = VectorStore(db)
         self.schema_service = SchemaService(registry=self.artifact_registry)
         self.evaluation_service = EvaluationService(registry=self.artifact_registry, llm_gateway=self.llm_gateway)
-        self.tool_runtime = ToolRuntime()
+        self.tool_runtime = ToolRuntime(skill_service=self.skill_service)
+        self.node_chat_service = NodeChatService(self.llm_gateway, self.skill_service)
         self.graph_patch_service = GraphPatchService()
         self.intent_parser = IntentParserService()
         self.patch_planner = PatchPlannerService()
         self.validation_bridge = ValidationBridge()
+
+    @staticmethod
+    def _blueprint_hash(blueprint: dict[str, Any] | None) -> str:
+        return stable_hash(canonicalize_for_hashing(blueprint or {}))
 
     async def execute_task(
         self,
@@ -112,6 +128,7 @@ class TaskService:
         auto_approve_human_review: bool,
         use_sample_data: bool,
         files: list,
+        source_urls: list[str] | None = None,
         execution_overrides: dict[str, Any] | None = None,
         determinism_mode: DeterminismMode | None = None,
         control_level: ControlLevel = ControlLevel.operational,
@@ -122,22 +139,26 @@ class TaskService:
             control_level=control_level,
             auto_approve_human_review=auto_approve_human_review,
         )
+        task_id = uuid4().hex[:12]
+
+        documents = []
+        if files:
+            documents.extend(await self.document_processor.store_uploads(task_id, files))
+        if source_urls:
+            documents.extend(await self.document_processor.store_links(task_id, source_urls))
+        if not documents and use_sample_data:
+            documents = self.document_processor.load_sample_pack(task_id)
+
         synthesized = self.program_synthesizer.synthesize(
             prompt,
+            documents=documents,
             deterministic=determinism_mode == DeterminismMode.strict_deterministic,
             determinism_mode=determinism_mode.value,
+            control_level=control_level.value,
         )
         synthesized = self._apply_execution_overrides(synthesized, execution_overrides)
         self.artifact_registry.register_bundle(synthesized)
         self.schema_service.register_bundle_schemas(synthesized)
-        task_id = uuid4().hex[:12]
-
-        if files:
-            documents = await self.document_processor.store_uploads(task_id, files)
-        elif use_sample_data:
-            documents = self.document_processor.load_sample_pack(task_id)
-        else:
-            documents = []
 
         provider_metadata = self.program_synthesizer.last_provider_metadata or self.llm_gateway.describe_provider(determinism_mode.value)
 
@@ -156,6 +177,7 @@ class TaskService:
         self._apply_control_requirements(state, auto_approve_human_review=auto_approve_human_review)
         if self.program_synthesizer.last_prompt_trace is not None:
             state.prompt_traces.append(self.program_synthesizer.last_prompt_trace)
+        state.planner_trace = self.program_synthesizer.last_planner_trace
 
         state.logs.append(
             ExecutionLogEntry(
@@ -254,6 +276,114 @@ class TaskService:
             raise ValueError(f"Node {node_id} not found for task {task_id}.")
         return self._build_node_detail(state, node)
 
+    def chat_with_node(
+        self,
+        task_id: str,
+        node_id: str,
+        message: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> NodeChatResponse:
+        state = GraphReasoningState.model_validate(self._require_record(task_id).grs_snapshot)
+        node = state.nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Node {node_id} not found for task {task_id}.")
+        response = self.node_chat_service.chat(state, node, message=message, history=history or [])
+        return NodeChatResponse(
+            task_id=task_id,
+            node_id=node_id,
+            reply=str(response.get("reply") or "").strip(),
+            tool_results=response.get("tool_results", []),
+            suggested_actions=response.get("suggested_actions", []),
+            model_metadata=response.get("model_metadata", {}),
+        )
+
+    def delete_task(self, task_id: str) -> DeleteTaskResponse:
+        record = self._require_record(task_id)
+        self.db.query(ReviewDecisionRecord).filter(ReviewDecisionRecord.task_id == task_id).delete(synchronize_session=False)
+        self.db.query(EmbeddingRecord).filter(EmbeddingRecord.task_id == task_id).delete(synchronize_session=False)
+        self.db.delete(record)
+        self.db.commit()
+        return DeleteTaskResponse(task_id=task_id, deleted=True)
+
+    def list_skills(self) -> list[SkillSummary]:
+        artifacts = self.skill_service.list_skills()
+        return [self._skill_summary_from_artifact(artifact) for artifact in artifacts]
+
+    def get_skill(self, skill_id: str, version: str | None = None) -> SkillArtifactResponse:
+        artifact = self.skill_service.get_skill(skill_id, version=version)
+        return self._skill_artifact_from_registry(artifact)
+
+    def generate_skill(
+        self,
+        prompt: str,
+        language: str = "python",
+        skill_type: str = "script",
+        existing_code: str = "",
+    ) -> SkillArtifactResponse:
+        payload = self.skill_service.generate_skill(
+            prompt=prompt,
+            language=language,
+            skill_type=skill_type,
+            existing_code=existing_code,
+        )
+        return SkillArtifactResponse(
+            skill_id="draft",
+            version="draft",
+            name=str(payload.get("name") or "Generated Skill"),
+            description=str(payload.get("description") or ""),
+            language=str(payload.get("language") or language),
+            skill_type=str(payload.get("skill_type") or skill_type),
+            updated_at=utcnow(),
+            status="draft",
+            entrypoint_filename=str(payload.get("entrypoint_filename") or "main.py"),
+            code=str(payload.get("code") or ""),
+            test_input=str(payload.get("test_input") or ""),
+            notes=[str(note) for note in payload.get("notes", []) if str(note).strip()],
+            suggested_node_executor=str(payload.get("suggested_node_executor") or "tool_operator"),
+        )
+
+    def save_skill(
+        self,
+        skill_id: str,
+        version: str,
+        name: str,
+        description: str,
+        language: str,
+        skill_type: str,
+        entrypoint_filename: str,
+        code: str,
+        test_input: str = "",
+    ) -> SkillArtifactResponse:
+        artifact = self.skill_service.save_skill(
+            skill_id=skill_id,
+            version=version,
+            name=name,
+            description=description,
+            language=language,
+            skill_type=skill_type,
+            entrypoint_filename=entrypoint_filename,
+            code=code,
+            test_input=test_input,
+        )
+        return self._skill_artifact_from_registry(artifact)
+
+    def test_skill(
+        self,
+        language: str,
+        entrypoint_filename: str,
+        code: str,
+        test_input: str = "",
+        args: list[str] | None = None,
+    ) -> SkillTestResponse:
+        result = self.skill_service.test_skill(
+            language=language,
+            entrypoint_filename=entrypoint_filename,
+            code=code,
+            test_input=test_input,
+            args=args,
+        )
+        return SkillTestResponse(**result)
+
     def list_reviews(self, task_id: str) -> list[ReviewDecision]:
         return self.review_service.list_for_task(task_id)
 
@@ -301,6 +431,93 @@ class TaskService:
                 )
             )
             state.pending_review_node_id = None
+
+        provider_metadata = self.llm_gateway.describe_provider(state.determinism_mode.value)
+        self._finalize_state(state, provider_metadata)
+        self.audit_store.snapshot(state, "final")
+        audit_package, _ = self.audit_store.persist_audit_package(state)
+        self._persist_record(state, audit_package)
+        return self._build_response(state, audit_package)
+
+    def pass_and_verify_node(
+        self,
+        task_id: str,
+        node_id: str,
+        reviewer: str = "dashboard-user",
+        comments: str = "",
+        resume_execution: bool = True,
+    ) -> TaskRunResponse:
+        record = self._require_record(task_id)
+        state = GraphReasoningState.model_validate(record.grs_snapshot)
+        state.review_history = self.review_service.list_for_task(task_id)
+        node = state.nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Node {node_id} not found for task {task_id}.")
+
+        now = utcnow()
+        note = comments.strip() or f"Manual pass and verify recorded by {reviewer}."
+
+        node.status = NodeStatus.completed
+        node.started_at = node.started_at or now
+        node.completed_at = now
+        node.verification_status = VerificationStatus.passed
+        node.verification_checks = list(dict.fromkeys([*node.verification_checks, note]))
+        if not node.thought_summary:
+            node.thought_summary = note
+        node.metadata["manual_pass_verified"] = True
+        node.metadata["manual_pass_verified_by"] = reviewer
+        node.metadata["manual_pass_verified_at"] = now.isoformat()
+
+        state.verification_logs.append(
+            VerificationLogEntry(
+                node_id=node.id,
+                status=VerificationStatus.passed,
+                checks=node.verification_checks,
+                evidence_refs=node.evidence_refs,
+            )
+        )
+
+        required_approvals = max(node.required_approvals, 1 if node.metadata.get("requires_human_review") else 0)
+        approved_count = self._approved_count(state, node.id)
+        for _ in range(max(required_approvals - approved_count, 0)):
+            saved_decision = self.review_service.record(
+                task_id,
+                ReviewDecision(
+                    node_id=node.id,
+                    reviewer=reviewer,
+                    decision="approved",
+                    comments=note,
+                ),
+            )
+            state.review_history.append(saved_decision)
+
+        node.metadata["review_approved"] = True
+        was_pending_review = state.pending_review_node_id == node.id
+        if was_pending_review:
+            state.pending_review_node_id = None
+
+        state.logs.append(
+            ExecutionLogEntry(
+                event="node_manually_pass_verified",
+                message=note,
+                node_id=node.id,
+                payload={
+                    "reviewer": reviewer,
+                    "resume_execution": resume_execution,
+                    "was_pending_review": was_pending_review,
+                },
+            )
+        )
+
+        if resume_execution and state.status != TaskStatus.completed:
+            state.status = TaskStatus.running
+            state.completed_at = None
+            controller = self._build_controller(
+                task_id=task_id,
+                documents=state.source_documents,
+                auto_approve_human_review=False,
+            )
+            state = controller.run(state)
 
         provider_metadata = self.llm_gateway.describe_provider(state.determinism_mode.value)
         self._finalize_state(state, provider_metadata)
@@ -456,6 +673,7 @@ class TaskService:
         node_id: str,
         executor_type: str,
         executor_profile: str | None,
+        skill_artifact_id: str | None,
         max_child_agents: int,
         max_recursion_depth: int,
         child_token_budget: int,
@@ -475,6 +693,8 @@ class TaskService:
         }
         if executor_profile:
             payload["executor_profile"] = executor_profile
+        if skill_artifact_id:
+            payload["skill_artifact_id"] = skill_artifact_id
         if instruction_note.strip():
             payload["instruction_note"] = instruction_note.strip()
         return self.apply_graph_patch(
@@ -819,6 +1039,7 @@ class TaskService:
                 {
                     **structured_entry,
                     "thought_summary": state.thoughts.get(f"thought_{node.id}").summary if f"thought_{node.id}" in state.thoughts else "",
+                    "reasoning_trace": node.reasoning_trace,
                     "expansion_contracts": node.expansion_contracts,
                     "delegated_from": node.spawned_from,
                     "model_metadata": node.model_metadata,
@@ -885,6 +1106,33 @@ class TaskService:
         )
         return templates
 
+    @staticmethod
+    def _skill_summary_from_artifact(artifact) -> SkillSummary:
+        payload = artifact.payload if isinstance(artifact.payload, dict) else {}
+        return SkillSummary(
+            skill_id=artifact.artifact_id,
+            version=artifact.version,
+            name=artifact.name,
+            description=artifact.description,
+            language=str(payload.get("language") or "python"),
+            skill_type=str(payload.get("skill_type") or "script"),
+            updated_at=artifact.updated_at,
+            status=artifact.status,
+        )
+
+    @classmethod
+    def _skill_artifact_from_registry(cls, artifact) -> SkillArtifactResponse:
+        payload = artifact.payload if isinstance(artifact.payload, dict) else {}
+        summary = cls._skill_summary_from_artifact(artifact)
+        return SkillArtifactResponse(
+            **summary.model_dump(),
+            entrypoint_filename=str(payload.get("entrypoint_filename") or "main.py"),
+            code=str(payload.get("code") or ""),
+            test_input=str(payload.get("test_input") or ""),
+            notes=[str(note) for note in payload.get("notes", []) if str(note).strip()],
+            suggested_node_executor=str(payload.get("suggested_node_executor") or "tool_operator"),
+        )
+
     def _instantiate_state(
         self,
         task_id: str,
@@ -911,6 +1159,7 @@ class TaskService:
                 priority=node.priority,
                 executor_type=node.executor_type,
                 executor_profile=getattr(node, "executor_profile", None) or node.metadata.get("executor_profile"),
+                agent_spec=getattr(node, "agent_spec", None),
                 max_child_agents=node.max_child_agents,
                 max_recursion_depth=node.max_recursion_depth,
                 child_token_budget=int(getattr(node, "child_token_budget", 0) or node.metadata.get("child_token_budget", 0) or 0),
@@ -961,6 +1210,11 @@ class TaskService:
                 if isinstance(program.metadata, dict)
                 else {}
             ),
+            planner_trace=(
+                PlannerTrace.model_validate((program.metadata or {}).get("planner_trace"))
+                if isinstance(program.metadata, dict) and isinstance((program.metadata or {}).get("planner_trace"), dict)
+                else None
+            ),
             program_blueprint=program.model_dump(mode="json", by_alias=True),
             output_schema_definition=bundle.output_schema_definition,
         )
@@ -1009,7 +1263,7 @@ class TaskService:
         state.graph_version_history.append(
             GraphVersionRecord(
                 program_version=state.program_version,
-                blueprint_hash=stable_hash(state.program_blueprint or {}),
+                blueprint_hash=self._blueprint_hash(state.program_blueprint),
                 created_by="system",
                 reason="Initial graph instantiation.",
             )
@@ -1029,7 +1283,7 @@ class TaskService:
         state.graph_version_history.append(
             GraphVersionRecord(
                 program_version=state.program_version,
-                blueprint_hash=stable_hash(state.program_blueprint or {}),
+                blueprint_hash=self._blueprint_hash(state.program_blueprint),
                 created_by=requested_by,
                 reason=reason,
                 patch_id=patch.patch_id,
@@ -1059,8 +1313,8 @@ class TaskService:
             patch_type=patch.patch_type,
             before_program_version=before_state.program_version,
             after_program_version=after_state.program_version,
-            before_blueprint_hash=stable_hash(before_state.program_blueprint or {}),
-            after_blueprint_hash=stable_hash(after_state.program_blueprint or {}),
+            before_blueprint_hash=self._blueprint_hash(before_state.program_blueprint),
+            after_blueprint_hash=self._blueprint_hash(after_state.program_blueprint),
             added_nodes=sorted(after_node_ids - before_node_ids),
             removed_nodes=sorted(before_node_ids - after_node_ids),
             changed_nodes=changed_nodes,
@@ -1179,6 +1433,14 @@ class TaskService:
         prepared.model_metadata = ui_model_metadata(node.model_metadata)
         return prepared
 
+    @staticmethod
+    def _approval_reviewers_for_node(state: GraphReasoningState, node_id: str) -> list[str]:
+        return [
+            review.reviewer
+            for review in state.review_history
+            if review.node_id == node_id and review.decision.lower() in {"approved", "approve"}
+        ]
+
     def _build_node_detail(self, state: GraphReasoningState, node: GraphNodeState) -> NodeDetailResponse:
         prepared = self._prepared_node(state, node)
         patch_history = self._patch_history_for_node(state, node.id)
@@ -1190,15 +1452,18 @@ class TaskService:
             top_evidence=prepared.evidence_refs[:3],
             finding_records=prepared.finding_records,
             approval_state=prepared.approval_state,
+            approval_reviewers=self._approval_reviewers_for_node(state, node.id),
             delegated_children=prepared.delegated_children,
             delegated_summaries=list(node.metadata.get("delegated_summaries", [])),
             patch_history=patch_history,
+            reasoning_trace=prepared.reasoning_trace,
             technical_details={
                 "inputs": node.inputs,
                 "output": node.output,
                 "verification_checks": prepared.verification_checks,
                 "model_metadata": ui_model_metadata(node.model_metadata),
                 "evidence_scope": node.evidence_scope,
+                "reasoning_trace": prepared.reasoning_trace,
             },
         )
 
@@ -1325,6 +1590,8 @@ class TaskService:
             evidence_graph_nodes=state.evidence_graph_nodes,
             evidence_graph_edges=state.evidence_graph_edges,
             prompt_traces=state.prompt_traces,
+            planner_trace=state.planner_trace,
+            runtime_graph_deltas=state.runtime_graph_deltas,
             graph_patch_history=state.graph_patch_history,
             graph_version_history=state.graph_version_history,
             patch_diff_history=state.patch_diff_history,

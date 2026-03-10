@@ -5,6 +5,8 @@ from app.models.runtime import (
     EvidenceSupportLevel,
     FindingRecord,
     GraphEdge,
+    GraphDelta,
+    GraphDeltaOperation,
     GraphNodeState,
     GraphReasoningState,
     NodeExecutionResult,
@@ -21,9 +23,15 @@ from app.runtime.scheduler import Scheduler
 from app.services.document_processor import DocumentProcessor
 from app.services.generic_reasoning_operator import GenericReasoningOperator
 from app.services.knowledge_base import KnowledgeBase
-from app.services.llm_gateway import LLMGateway
+from app.services.llm_gateway import LLMGateway, MockProvider
 from app.services.program_synthesizer import ProgramSynthesisService
 from app.services.task_service import TaskService
+
+
+def _mock_llm_gateway() -> LLMGateway:
+    gateway = LLMGateway()
+    gateway.provider = MockProvider()
+    return gateway
 
 
 def test_verify_gate_blocks_guarded_node() -> None:
@@ -69,8 +77,52 @@ def test_verify_gate_blocks_guarded_node() -> None:
     assert [node.id for node in scheduler.ready_nodes(state)] == ["guarded"]
 
 
+def test_dependency_snapshot_includes_reasoning_and_findings() -> None:
+    evidence = EvidenceReference(
+        id="dep_chunk",
+        document_id="doc_dep",
+        document_name="dependency.txt",
+        chunk_id="dep_chunk",
+        retrieval_score=0.9,
+        support_level=EvidenceSupportLevel.direct,
+        citation_mode="direct",
+        source_type="retrieved",
+        text_excerpt="Dependency evidence.",
+    )
+    dependency = GraphNodeState(
+        id="dep_node",
+        title="Dependency Node",
+        subtitle="Produces upstream reasoning",
+        operation_type="analyze",
+        priority=10,
+        status=NodeStatus.completed,
+        verification_status=VerificationStatus.passed,
+        output={"result": "upstream"},
+        thought_summary="Upstream summary",
+        reasoning_trace="Upstream reasoning trace.",
+        evidence_refs=[evidence],
+        finding_records=[
+            FindingRecord(
+                id="dep_finding",
+                text="Upstream finding",
+                support_level=EvidenceSupportLevel.direct,
+                claim_classification=ClaimClassification.grounded,
+                evidence_refs=[evidence],
+            )
+        ],
+    )
+
+    snapshot = Controller._dependency_snapshot(dependency)
+
+    assert snapshot["output"] == {"result": "upstream"}
+    assert snapshot["thought_summary"] == "Upstream summary"
+    assert snapshot["reasoning_trace"] == "Upstream reasoning trace."
+    assert snapshot["finding_records"][0]["text"] == "Upstream finding"
+    assert snapshot["evidence_refs"][0]["document_id"] == "doc_dep"
+
+
 def test_synthesized_program_flow_produces_report(tmp_path) -> None:
-    llm_gateway = LLMGateway()
+    llm_gateway = _mock_llm_gateway()
     synthesizer = ProgramSynthesisService(llm_gateway)
     synthesizer.generated_root = tmp_path / "generated_artifacts"
     bundle = synthesizer.synthesize("Perform a financial audit for Invisium FY2026")
@@ -126,6 +178,51 @@ def test_synthesized_program_flow_produces_report(tmp_path) -> None:
     assert completed.final_output is not None
     assert "conclusion" in completed.final_output or "objective" in completed.final_output
     assert any(log.status in {VerificationStatus.passed, VerificationStatus.skipped} for log in completed.verification_logs)
+
+
+def test_synthesizer_profiles_graph_by_task_type_and_control_level(tmp_path) -> None:
+    llm_gateway = _mock_llm_gateway()
+    synthesizer = ProgramSynthesisService(llm_gateway)
+    synthesizer.generated_root = tmp_path / "generated_artifacts"
+
+    audit_bundle = synthesizer.synthesize(
+        "Perform a financial audit for Invisium FY2026 and assess control breakdowns.",
+        control_level="strict_audit",
+    )
+    research_bundle = synthesizer.synthesize(
+        "Research recent SaaS pricing moves, investigate competing explanations, and highlight unresolved gaps.",
+        control_level="operational",
+    )
+
+    audit_titles = {node.title for node in audit_bundle.program.nodes}
+    research_titles = {node.title for node in research_bundle.program.nodes}
+    audit_final = next(node for node in audit_bundle.program.nodes if node.operation_type == "synthesize")
+    research_verify = next(node for node in research_bundle.program.nodes if node.operation_type == "verify")
+
+    assert "Control Review" in audit_titles
+    assert "Alternative Hypotheses" in research_titles
+    assert audit_titles != research_titles
+    assert audit_final.required_approvals >= 2
+    assert research_bundle.program.policy == "breadth_first"
+    assert research_verify.required_approvals == 0
+
+
+def test_synthesizer_adds_tool_and_delegation_when_task_profile_requires_it(tmp_path) -> None:
+    llm_gateway = _mock_llm_gateway()
+    synthesizer = ProgramSynthesisService(llm_gateway)
+    synthesizer.generated_root = tmp_path / "generated_artifacts"
+
+    calculation_bundle = synthesizer.synthesize(
+        "Calculate revenue variance trends from the uploaded spreadsheet and reconcile the drivers.",
+        control_level="operational",
+    )
+    expanded_research_bundle = synthesizer.synthesize(
+        "Research recent enforcement actions, expand the analysis deeply, and compare alternative explanations.",
+        control_level="operational",
+    )
+
+    assert any(node.executor_type == "tool_operator" for node in calculation_bundle.program.nodes)
+    assert any(node.executor_type == "agent_operator" for node in expanded_research_bundle.program.nodes)
 
 
 def test_delegated_child_nodes_gate_downstream_execution_and_audit_completion(tmp_path) -> None:
@@ -283,7 +380,7 @@ def test_delegated_child_nodes_gate_downstream_execution_and_audit_completion(tm
 
 
 def test_synthesizer_normalizes_loose_node_schema() -> None:
-    synthesizer = ProgramSynthesisService(LLMGateway())
+    synthesizer = ProgramSynthesisService(_mock_llm_gateway())
     bundle = synthesizer._normalize_bundle(
         {
             "template_id": "sample_template",
@@ -336,12 +433,126 @@ def test_synthesizer_normalizes_loose_node_schema() -> None:
     assert first_node.operation_type == "generate"
     assert first_node.success_criteria == ["Documents indexed", "no ingestion errors."]
     assert first_node.next_nodes == ["verification_stage"]
+    assert first_node.agent_spec is not None
+    assert first_node.agent_spec.persona == "Doc Intake"
+    assert first_node.agent_spec.instruction == "Collect the source material."
     assert second_node.operation_type == "verify"
     assert second_node.depends_on == ["doc_intake"]
 
 
+def test_controller_applies_runtime_graph_delta_and_records_audit(tmp_path) -> None:
+    budget = BudgetSpec(max_nodes=6, max_tokens=1000, max_runtime_seconds=60)
+    state = GraphReasoningState(
+        task_id="graph-delta-test",
+        prompt="Investigate the exception and produce a final report.",
+        template_id="runtime_graph_delta",
+        program_id="runtime_graph_delta_v1",
+        program_version="1.0.0",
+        deterministic=True,
+        budget_spec=budget,
+        nodes={
+            "analysis": GraphNodeState(
+                id="analysis",
+                title="Analysis",
+                subtitle="Inspect the issue",
+                operation_type="analyze",
+                priority=10,
+                next_nodes=["final_report"],
+            ),
+            "final_report": GraphNodeState(
+                id="final_report",
+                title="Final Report",
+                subtitle="Produce the report",
+                operation_type="synthesize",
+                priority=20,
+                depends_on=["analysis"],
+            ),
+        },
+        edges=[GraphEdge(source="analysis", target="final_report")],
+    )
+
+    class RuntimeDeltaRunner:
+        def execute(self, current_state: GraphReasoningState, node: GraphNodeState) -> NodeExecutionResult:
+            if node.id == "analysis":
+                return NodeExecutionResult(
+                    output={"analysis": "Initial issue review completed."},
+                    verification_status=VerificationStatus.skipped,
+                    thought_summary="Analysis completed and requested a targeted follow-up.",
+                    llm_usage_tokens=12,
+                    graph_delta=GraphDelta(
+                        summary="Insert a targeted research step before synthesis.",
+                        operations=[
+                            GraphDeltaOperation(
+                                patch_type="insert_node_between",
+                                change_reason="Need one explicit follow-up step before synthesis.",
+                                payload={
+                                    "source_node_id": "analysis",
+                                    "target_node_id": "final_report",
+                                    "node": {
+                                        "id": "targeted_research",
+                                        "title": "Targeted Research",
+                                        "subtitle": "Validate the exception with one more focused step",
+                                        "operation_type": "analyze",
+                                        "instruction": "Run one targeted follow-up analysis and summarize the result.",
+                                        "success_criteria": ["Follow-up completed"],
+                                        "executor_type": "agent_operator",
+                                        "executor_profile": "research_specialist",
+                                        "agent_spec": {
+                                            "persona": "Research Specialist",
+                                            "instruction": "Perform one targeted follow-up investigation before synthesis.",
+                                            "context": {"source_node_id": "analysis"},
+                                        },
+                                    },
+                                },
+                            )
+                        ],
+                    ),
+                )
+            if node.id == "targeted_research":
+                return NodeExecutionResult(
+                    output={"research": "Follow-up completed."},
+                    verification_status=VerificationStatus.skipped,
+                    thought_summary="Targeted research completed.",
+                    llm_usage_tokens=8,
+                )
+            return NodeExecutionResult(
+                output={"conclusion": "Final report incorporates the targeted research step."},
+                verification_status=VerificationStatus.skipped,
+                thought_summary="Final synthesis completed.",
+                llm_usage_tokens=5,
+                final_output={
+                    "objective": "Investigate the exception",
+                    "conclusion": "The final report includes the inserted targeted research step.",
+                    "findings": ["A targeted research node was inserted at runtime."],
+                    "evidence_sources": [],
+                    "next_steps": [],
+                    "finding_records": [],
+                },
+            )
+
+    controller = Controller(
+        scheduler=Scheduler(ConstraintInjector()),
+        constraints=ConstraintInjector(),
+        budget_manager=BudgetManager(),
+        audit_store=AuditStore(tmp_path),
+        operation_runner=RuntimeDeltaRunner(),
+    )
+
+    completed = controller.run(state)
+
+    assert completed.status == TaskStatus.completed
+    assert completed.execution_sequence == ["analysis", "targeted_research", "final_report"]
+    assert completed.program_version == "1.0.1"
+    assert completed.runtime_graph_deltas
+    assert completed.runtime_graph_deltas[0].operations[0].patch_type == "insert_node_between"
+    assert completed.nodes["targeted_research"].agent_spec is not None
+    assert completed.nodes["final_report"].depends_on == ["targeted_research"]
+    assert any(entry.event == "runtime_graph_delta_applied" for entry in completed.logs)
+    assert completed.graph_patch_history[0].requested_by == "runtime:analysis"
+
+
 def test_synthesizer_accepts_program_only_payload() -> None:
-    synthesizer = ProgramSynthesisService(LLMGateway())
+    synthesizer = ProgramSynthesisService(_mock_llm_gateway())
     bundle = synthesizer._normalize_bundle(
         {
             "program_id": "program_only_v1",

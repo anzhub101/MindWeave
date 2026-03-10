@@ -8,7 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from app.change_planning.intent_models import ChangeIntent, PatchProposal, PatchValidationResult
-from app.models.artifacts import BudgetSpec
+from app.models.artifacts import AgentSpec, BudgetSpec
 
 
 def utcnow() -> datetime:
@@ -34,6 +34,10 @@ def _normalize_evidence_list(value: Any) -> list[dict[str, Any]]:
                 }
             )
             continue
+        if hasattr(item, "model_dump"):
+            payload = item.model_dump(mode="json")
+            if isinstance(payload, dict):
+                item = payload
         if isinstance(item, dict):
             payload = dict(item)
             identifier = str(
@@ -204,6 +208,41 @@ class PromptTrace(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class PlannerEvidenceSource(BaseModel):
+    source_id: str
+    source_type: str
+    label: str
+    detail: str = ""
+    url: str | None = None
+
+
+class PlannerCandidateOperation(BaseModel):
+    operation: str
+    disposition: str = "considered"
+    rationale: str
+    target_node_id: str | None = None
+
+
+class PlannerNodeDecision(BaseModel):
+    node_id: str
+    action: str
+    reason: str
+
+
+class PlannerTrace(BaseModel):
+    trace_id: str = Field(default_factory=lambda: f"planner_{uuid4().hex[:10]}")
+    summary: str = ""
+    graph_shape_reason: str = ""
+    evidence_sources_available: list[PlannerEvidenceSource] = Field(default_factory=list)
+    web_fallback_used: bool = False
+    web_search_queries: list[str] = Field(default_factory=list)
+    candidate_graph_operations: list[PlannerCandidateOperation] = Field(default_factory=list)
+    node_decisions: list[PlannerNodeDecision] = Field(default_factory=list)
+    confidence: float | None = None
+    unresolved_gaps: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class GraphPatchRecord(BaseModel):
     patch_id: str = Field(default_factory=lambda: f"patch_{uuid4().hex[:10]}")
     patch_type: str
@@ -295,6 +334,22 @@ class ThoughtRecord(BaseModel):
         return _normalize_evidence_list(value)
 
 
+class GraphDeltaOperation(BaseModel):
+    patch_type: str
+    target_node_id: str | None = None
+    change_reason: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    auto_rerun: bool = False
+
+
+class GraphDelta(BaseModel):
+    delta_id: str = Field(default_factory=lambda: f"delta_{uuid4().hex[:10]}")
+    source_node_id: str | None = None
+    summary: str = ""
+    operations: list[GraphDeltaOperation] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class ExecutionLogEntry(BaseModel):
     timestamp: datetime = Field(default_factory=utcnow)
     event: str
@@ -362,6 +417,7 @@ class GraphNodeState(BaseModel):
     priority: int
     executor_type: ExecutorType = ExecutorType.llm_operator
     executor_profile: str | None = None
+    agent_spec: AgentSpec | None = None
     max_child_agents: int = 0
     max_recursion_depth: int = 0
     child_token_budget: int = 0
@@ -378,6 +434,7 @@ class GraphNodeState(BaseModel):
     evidence_refs: list[EvidenceReference] = Field(default_factory=list)
     finding_records: list[FindingRecord] = Field(default_factory=list)
     thought_summary: str = ""
+    reasoning_trace: str | None = None
     inputs: dict[str, Any] = Field(default_factory=dict)
     output: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -433,6 +490,7 @@ class GraphReasoningState(BaseModel):
     evidence_graph_nodes: dict[str, EvidenceGraphNode] = Field(default_factory=dict)
     evidence_graph_edges: list[EvidenceGraphEdge] = Field(default_factory=list)
     prompt_traces: list[PromptTrace] = Field(default_factory=list)
+    planner_trace: PlannerTrace | None = None
     graph_patch_history: list[GraphPatchRecord] = Field(default_factory=list)
     graph_version_history: list[GraphVersionRecord] = Field(default_factory=list)
     patch_diff_history: list[PatchDiffRecord] = Field(default_factory=list)
@@ -441,6 +499,7 @@ class GraphReasoningState(BaseModel):
     change_intents: list[ChangeIntent] = Field(default_factory=list)
     patch_proposals: list[PatchProposal] = Field(default_factory=list)
     patch_validation_history: list[PatchValidationResult] = Field(default_factory=list)
+    runtime_graph_deltas: list[GraphDelta] = Field(default_factory=list)
     logs: list[ExecutionLogEntry] = Field(default_factory=list)
     verification_logs: list[VerificationLogEntry] = Field(default_factory=list)
     review_history: list[ReviewDecision] = Field(default_factory=list)
@@ -464,12 +523,14 @@ class NodeExecutionResult(BaseModel):
     verification_status: VerificationStatus = VerificationStatus.skipped
     verification_checks: list[str] = Field(default_factory=list)
     thought_summary: str = ""
+    reasoning_trace: str | None = None
     llm_usage_tokens: int = 0
     prompt_trace: PromptTrace | None = None
     model_metadata: dict[str, Any] = Field(default_factory=dict)
     finding_records: list[FindingRecord] = Field(default_factory=list)
     final_output: dict[str, Any] | None = None
     final_summary: dict[str, Any] | None = None
+    graph_delta: GraphDelta | None = None
     spawned_nodes: list[GraphNodeState] = Field(default_factory=list)
     cache_hit: bool = False
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)

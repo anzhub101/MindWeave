@@ -15,6 +15,7 @@ MindWeave is a FoT-inspired Reasoning-as-a-Service platform that synthesizes rea
 - Requirements-driven schema and graph generation
 - Priority-based scheduling with verify-gate enforcement
 - K2 Think v2 acting as the orchestrator/controller model through `/v1/chat/completions`
+- Optional Brave web search fallback, including MCP transport, when no uploaded evidence is available
 - Optional Pinecone retrieval with a dedicated namespace per task
 - Full traceability of node inputs, outputs, verification results, generated schemas, and exported audit JSON
 - Versioned design artifacts with promotion history and optimizer-selected profiles
@@ -69,8 +70,22 @@ MW_K2_API_KEY=your_key_here
 MW_K2_MODEL=MBZUAI-IFM/K2-Think-v2
 MW_K2_CHAT_BASE_URL=https://api.k2think.ai/v1/chat/completions
 MW_K2_AGENT_BASE_URL=https://api.k2think.ai/v1/chat/completions
+MW_WEB_SEARCH_ENABLED=false
 MW_VECTOR_BACKEND=local
 ```
+
+To enable agentic web fallback with Brave:
+
+```env
+MW_WEB_SEARCH_ENABLED=true
+MW_WEB_SEARCH_BACKEND=mcp
+MW_WEB_SEARCH_TRANSPORT_FALLBACK=api
+MW_BRAVE_API_KEY=your_key_here
+MW_BRAVE_MCP_COMMAND=npx -y brave-search-mcp
+MW_BRAVE_SEARCH_URL=https://api.search.brave.com/res/v1/web/search
+```
+
+When web fallback is enabled, the planner and node runtime search the web only when no uploaded evidence is available or retrieval comes back empty. Web results are converted into evidence references, surfaced in the reasoning UI, and recorded in the planner trace and audit package.
 
 To use PostgreSQL instead, start the bundled pgvector-capable container and point `MW_DATABASE_URL` at it:
 
@@ -183,11 +198,12 @@ The frontend expects the API at `http://localhost:8000/api` by default. Override
 1. Start the backend.
 2. Start the frontend.
 3. Open the dashboard.
-4. Submit a task prompt. If you do not upload files, the bundled sample pack is used.
-5. The backend synthesizes a reasoning program from [docs/requirements-planning.md](/Users/manzeem/MindWeave/docs/requirements-planning.md) and the prompt.
-6. Uploaded documents are stored through the configured storage backend, OCR-processed when needed, and chunked for retrieval.
-7. Inspect nodes in the graph.
-8. Export the audit package from the result card.
+4. Submit a task prompt. If you upload files, the runtime anchors to them first. If you do not upload files and web fallback is enabled, the runtime can anchor to Brave search results instead.
+5. The backend synthesizes a reasoning program from [docs/requirements-planning.md](/Users/manzeem/MindWeave/docs/requirements-planning.md), available evidence sources, and the prompt.
+6. Uploaded documents are stored through the configured storage backend, OCR-processed when needed, and chunked for retrieval. If no document evidence is available, the planner records whether it fell back to web search.
+7. Inspect nodes in the graph and open the Run Workbench to review the graph creation trace, candidate graph operations, node decisions, evidence sources, and unresolved gaps.
+8. Use `Save As Template` in the reasoning header to persist the current graph as a reusable template artifact.
+9. Export the audit package from the result card.
 
 If no backend is reachable, the frontend falls back to a polished offline demo state so the UI can still be reviewed.
 

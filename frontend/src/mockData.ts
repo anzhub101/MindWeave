@@ -1,4 +1,4 @@
-import type { EvidenceReference, TaskRunListItem, TaskRunResponse, TemplateSummary } from "./types";
+import type { EvidenceReference, SkillArtifact, TaskRunListItem, TaskRunResponse, TemplateSummary } from "./types";
 
 const basePrompt =
   "Perform a financial audit for Invisium FY2026 using the uploaded financial statements and supporting evidence.";
@@ -18,6 +18,13 @@ function demoEvidence(documentId: string): EvidenceReference {
     source_type: "retrieved",
     text_excerpt: "",
     metadata: {},
+  };
+}
+
+function demoNodeMetadata(column: number, row: number, demoExplanation: string) {
+  return {
+    layout: { column, row },
+    demo_explanation: demoExplanation,
   };
 }
 
@@ -65,6 +72,17 @@ export const mockTask: TaskRunResponse = {
         "Revenue cutoff observations: Twelve invoices totaling USD 214500 were recognized before shipment.",
       metadata: {},
     },
+    {
+      id: "doc_financials",
+      name: "financial_statements_excerpt.txt",
+      media_type: "text/plain",
+      storage_path: "",
+      text_path: "",
+      sha256: "demo",
+      extracted_text:
+        "Revenue: 12.5m\nNet income: 0.61m\nMateriality benchmark: 5 percent of pre-tax income with a revenue sanity check.",
+      metadata: {},
+    },
   ],
   nodes: [
     {
@@ -80,6 +98,8 @@ export const mockTask: TaskRunResponse = {
       verification_status: "skipped",
       verification_checks: [],
       thought_summary: "Defined the audit objective, company, and fiscal scope from the charter evidence.",
+      reasoning_trace:
+        "Mapped the charter evidence to a bounded audit scope, identified the audited entity and fiscal period, and carried only source-backed scope details into the node output.",
       evaluation_score: 1,
       executor_type: "llm_operator",
       executor_profile: "general",
@@ -94,15 +114,105 @@ export const mockTask: TaskRunResponse = {
       patch_history: [],
       depends_on: [],
       guarded_by: [],
-      next_nodes: ["financial_data_analysis"],
+      next_nodes: ["assertion_scoping"],
       evidence_refs: [demoEvidence("doc_charter")],
       inputs: {},
       output: {
         company_name: "Invisium",
         fiscal_year: "FY2026",
       },
-      metadata: { layout: { column: 1, row: 0 } },
+      metadata: demoNodeMetadata(
+        1,
+        0,
+        "frame the engagement, identify the audited entity and period, and establish the evidence boundary before any testing starts",
+      ),
       latency_ms: 320,
+    },
+    {
+      id: "assertion_scoping",
+      title: "Assertion Scoping",
+      subtitle: "Map significant accounts and assertions",
+      operation_type: "generate",
+      instruction: "Identify the accounts, assertions, and audit areas that should drive planning and downstream testing.",
+      success_criteria: ["Key assertions listed", "High-risk accounts identified"],
+      evaluation_ids: ["output_present"],
+      priority: 15,
+      status: "completed",
+      verification_status: "skipped",
+      verification_checks: [],
+      thought_summary: "Mapped revenue, receivables, and close-process assertions into the planned audit scope.",
+      reasoning_trace:
+        "Used the audit charter and financial statement excerpt to identify the assertions most likely to drive material risk, especially cutoff, occurrence, and completeness for revenue.",
+      evaluation_score: 0.97,
+      executor_type: "llm_operator",
+      executor_profile: "general",
+      approval_state: {
+        required_approvals: 0,
+        approved_count: 0,
+        pending_approvals: 0,
+        requires_human_review: false,
+        status: "not_required",
+      },
+      delegated_children: [],
+      patch_history: [],
+      depends_on: ["audit_scope"],
+      guarded_by: [],
+      next_nodes: ["materiality_assessment"],
+      evidence_refs: [demoEvidence("doc_charter"), demoEvidence("doc_financials")],
+      inputs: {},
+      output: {
+        significant_accounts: ["Revenue", "Accounts receivable"],
+        significant_assertions: ["Occurrence", "Cutoff", "Completeness"],
+      },
+      metadata: demoNodeMetadata(
+        1,
+        1,
+        "translate the overall engagement into specific accounts and assertions so later nodes test the right audit questions",
+      ),
+      latency_ms: 540,
+    },
+    {
+      id: "materiality_assessment",
+      title: "Materiality Assessment",
+      subtitle: "Set planning materiality and tolerable error",
+      operation_type: "analyze",
+      instruction: "Compute a planning materiality view and explain how it should constrain downstream testing and findings.",
+      success_criteria: ["Materiality benchmark selected", "Testing implications stated"],
+      evaluation_ids: ["output_present"],
+      priority: 20,
+      status: "completed",
+      verification_status: "skipped",
+      verification_checks: [],
+      thought_summary: "Established the planning materiality anchor and used it to frame the significance of revenue timing exceptions.",
+      reasoning_trace:
+        "Compared common audit benchmarks against the available financials, selected a conservative anchor, and converted that into a practical threshold for downstream evaluation.",
+      evaluation_score: 0.98,
+      executor_type: "llm_operator",
+      executor_profile: "controls",
+      approval_state: {
+        required_approvals: 0,
+        approved_count: 0,
+        pending_approvals: 0,
+        requires_human_review: false,
+        status: "not_required",
+      },
+      delegated_children: [],
+      patch_history: [],
+      depends_on: ["assertion_scoping"],
+      guarded_by: [],
+      next_nodes: ["financial_data_analysis"],
+      evidence_refs: [demoEvidence("doc_financials")],
+      inputs: {},
+      output: {
+        planning_materiality: 625000,
+        tolerable_error: 312500,
+      },
+      metadata: demoNodeMetadata(
+        1,
+        2,
+        "set the audit significance threshold early so later findings can be judged against a defined materiality benchmark instead of ad hoc intuition",
+      ),
+      latency_ms: 860,
     },
     {
       id: "financial_data_analysis",
@@ -117,6 +227,8 @@ export const mockTask: TaskRunResponse = {
       verification_status: "skipped",
       verification_checks: [],
       thought_summary: "Extracted financial metrics and materiality anchors used downstream.",
+      reasoning_trace:
+        "Read the financial and controls evidence, normalized the numeric fields, and selected a materiality anchor that would affect downstream control and cutoff testing.",
       evaluation_score: 0.96,
       executor_type: "agent_operator",
       executor_profile: "revenue",
@@ -133,10 +245,10 @@ export const mockTask: TaskRunResponse = {
         requires_human_review: false,
         status: "not_required",
       },
-      depends_on: ["audit_scope"],
+      depends_on: ["materiality_assessment"],
       guarded_by: [],
-      next_nodes: ["compliance_check", "integrity_check"],
-      evidence_refs: [demoEvidence("doc_charter"), demoEvidence("doc_controls")],
+      next_nodes: ["controls_walkthrough", "compliance_check", "integrity_check"],
+      evidence_refs: [demoEvidence("doc_financials"), demoEvidence("doc_controls")],
       inputs: {},
       output: {
         key_metrics: {
@@ -145,8 +257,58 @@ export const mockTask: TaskRunResponse = {
           overall_materiality: 625000,
         },
       },
-      metadata: { layout: { column: 1, row: 1 } },
+      metadata: demoNodeMetadata(
+        1,
+        3,
+        "extract the core financial signals and tie them back to the materiality view so the audit can focus on the balances and trends that matter most",
+      ),
       latency_ms: 2100,
+    },
+    {
+      id: "controls_walkthrough",
+      title: "Controls Walkthrough",
+      subtitle: "Understand revenue and close controls",
+      operation_type: "analyze",
+      instruction: "Walk through the key revenue and close controls to identify where control reliance is reasonable and where substantive testing should expand.",
+      success_criteria: ["Key controls summarized", "Reliance implications stated"],
+      evaluation_ids: ["output_present"],
+      priority: 30,
+      status: "completed",
+      verification_status: "skipped",
+      verification_checks: [],
+      thought_summary: "Mapped the control flow and identified the revenue cutoff control as the key audit dependency.",
+      reasoning_trace:
+        "Used the controls evidence to reconstruct the revenue and close-process control path, focusing on where timing or approval weaknesses could create misstatement risk.",
+      evaluation_score: 0.95,
+      executor_type: "agent_operator",
+      executor_profile: "controls",
+      max_child_agents: 2,
+      max_recursion_depth: 1,
+      child_token_budget: 3500,
+      delegated_summary_required: true,
+      delegated_children: ["controls_walkthrough_expanded_1"],
+      patch_history: [],
+      approval_state: {
+        required_approvals: 0,
+        approved_count: 0,
+        pending_approvals: 0,
+        requires_human_review: false,
+        status: "not_required",
+      },
+      depends_on: ["financial_data_analysis"],
+      guarded_by: [],
+      next_nodes: ["risk_assessment"],
+      evidence_refs: [demoEvidence("doc_controls")],
+      inputs: {},
+      output: {
+        key_controls: ["Revenue cutoff review", "Month-end close approval"],
+      },
+      metadata: demoNodeMetadata(
+        0,
+        4,
+        "bridge planning and testing by showing which controls matter, where reliance is possible, and where substantive work should expand",
+      ),
+      latency_ms: 1540,
     },
     {
       id: "compliance_check",
@@ -189,7 +351,11 @@ export const mockTask: TaskRunResponse = {
       output: {
         conclusion: "Verification completed with exceptions logged.",
       },
-      metadata: { layout: { column: 0, row: 2 } },
+      metadata: demoNodeMetadata(
+        1,
+        4,
+        "test whether the planned audit view is still aligned with policy, cutoff, and compliance expectations before findings are aggregated",
+      ),
       latency_ms: 1800,
     },
     {
@@ -224,7 +390,11 @@ export const mockTask: TaskRunResponse = {
       output: {
         conclusion: "Integrity checks completed.",
       },
-      metadata: { layout: { column: 2, row: 2 } },
+      metadata: demoNodeMetadata(
+        2,
+        4,
+        "confirm that the underlying records are structurally usable so downstream risk scoring is not built on broken or incomplete financial data",
+      ),
       latency_ms: 1750,
     },
     {
@@ -256,10 +426,10 @@ export const mockTask: TaskRunResponse = {
         requires_human_review: false,
         status: "not_required",
       },
-      depends_on: ["compliance_check", "integrity_check"],
-      guarded_by: ["compliance_check", "integrity_check"],
+      depends_on: ["controls_walkthrough", "compliance_check", "integrity_check"],
+      guarded_by: ["controls_walkthrough", "compliance_check", "integrity_check"],
       next_nodes: ["human_review"],
-      evidence_refs: [demoEvidence("doc_controls")],
+      evidence_refs: [demoEvidence("doc_controls"), demoEvidence("doc_financials")],
       finding_records: [
         {
           id: "risk_assessment_finding_1",
@@ -283,7 +453,11 @@ export const mockTask: TaskRunResponse = {
           { title: "Customer concentration and collections pressure", severity: "high" },
         ],
       },
-      metadata: { layout: { column: 1, row: 3 } },
+      metadata: demoNodeMetadata(
+        1,
+        5,
+        "combine the control walkthrough, compliance results, and integrity checks into a single ranked risk view that can support review and final synthesis",
+      ),
       latency_ms: 1640,
     },
     {
@@ -318,7 +492,11 @@ export const mockTask: TaskRunResponse = {
       output: {
         review_mode: "simulated_auto_approval",
       },
-      metadata: { layout: { column: 1, row: 4 } },
+      metadata: demoNodeMetadata(
+        1,
+        6,
+        "simulate the partner or manager checkpoint that would normally challenge high-risk findings before the opinion is finalized",
+      ),
       latency_ms: 980,
     },
     {
@@ -334,6 +512,8 @@ export const mockTask: TaskRunResponse = {
       verification_status: "skipped",
       verification_checks: [],
       thought_summary: "Synthesized the final qualified opinion with linked findings and evidence.",
+      reasoning_trace:
+        "Merged the verified findings, ranked the revenue cutoff issue above the secondary control concerns, and drafted a review-ready conclusion with preserved evidence traceability.",
       evaluation_score: 0.94,
       executor_type: "llm_operator",
       approval_state: {
@@ -353,14 +533,22 @@ export const mockTask: TaskRunResponse = {
       output: {
         audit_opinion: "Qualified",
       },
-      metadata: { layout: { column: 1, row: 5 } },
+      metadata: demoNodeMetadata(
+        1,
+        7,
+        "merge the planning, testing, verification, and review outputs into the final audit conclusion without losing the evidence trail",
+      ),
       latency_ms: 2310,
     },
   ],
   edges: [
-    { source: "audit_scope", target: "financial_data_analysis", kind: "execution" },
+    { source: "audit_scope", target: "assertion_scoping", kind: "execution" },
+    { source: "assertion_scoping", target: "materiality_assessment", kind: "execution" },
+    { source: "materiality_assessment", target: "financial_data_analysis", kind: "execution" },
+    { source: "financial_data_analysis", target: "controls_walkthrough", kind: "execution" },
     { source: "financial_data_analysis", target: "compliance_check", kind: "execution" },
     { source: "financial_data_analysis", target: "integrity_check", kind: "execution" },
+    { source: "controls_walkthrough", target: "risk_assessment", kind: "execution" },
     { source: "compliance_check", target: "risk_assessment", kind: "execution" },
     { source: "integrity_check", target: "risk_assessment", kind: "execution" },
     { source: "risk_assessment", target: "human_review", kind: "execution" },
@@ -368,7 +556,10 @@ export const mockTask: TaskRunResponse = {
   ],
   execution_sequence: [
     "audit_scope",
+    "assertion_scoping",
+    "materiality_assessment",
     "financial_data_analysis",
+    "controls_walkthrough",
     "compliance_check",
     "integrity_check",
     "risk_assessment",
@@ -397,6 +588,80 @@ export const mockTask: TaskRunResponse = {
       metadata: { support_level: "direct" },
     },
   ],
+  planner_trace: {
+    trace_id: "planner_demo_01",
+    summary: "Built an audit planning and testing graph that starts with scope, assertions, and materiality before branching into control and verification work.",
+    graph_shape_reason:
+      "The graph starts with scope, assertions, and materiality so the audit plan is grounded before testing, then splits control and verification work so the final synthesis stays explicitly guarded and reviewable.",
+    evidence_sources_available: [
+      {
+        source_id: "doc_charter",
+        source_type: "upload",
+        label: "audit_charter.txt",
+        detail: "Task charter and fiscal scope",
+      },
+      {
+        source_id: "doc_controls",
+        source_type: "upload",
+        label: "controls_and_compliance.txt",
+        detail: "Controls exceptions and cutoff evidence",
+      },
+    ],
+    web_fallback_used: false,
+    web_search_queries: [],
+    candidate_graph_operations: [
+      {
+        operation: "linear_scope_mapping",
+        disposition: "selected",
+        rationale: "Keeps the task scope explicit before evidence analysis begins.",
+      },
+      {
+        operation: "branch_for_verification",
+        disposition: "selected",
+        rationale: "Separates validation from primary analysis so synthesis can be gated.",
+      },
+      {
+        operation: "materiality_before_testing",
+        disposition: "selected",
+        rationale: "Materiality is established before testing so later findings can be judged against a consistent significance threshold.",
+      },
+      {
+        operation: "direct_final_synthesis",
+        disposition: "rejected",
+        rationale: "Rejected because the audit flow needs a verification lane and reviewer checkpoint.",
+      },
+    ],
+    node_decisions: [
+      {
+        node_id: "audit_scope",
+        action: "added",
+        reason: "Added to restate the audit objective and define the evidence boundary.",
+      },
+      {
+        node_id: "materiality_assessment",
+        action: "added",
+        reason: "Added so downstream audit findings can be evaluated against a defined planning materiality threshold.",
+      },
+      {
+        node_id: "controls_walkthrough",
+        action: "branched",
+        reason: "Added as a separate branch to make control reliance and walkthrough observations explicit before risk aggregation.",
+      },
+      {
+        node_id: "compliance_check",
+        action: "branched",
+        reason: "Split into a verification branch to isolate policy adherence checks.",
+      },
+      {
+        node_id: "final_report_synthesis",
+        action: "merged",
+        reason: "Merged the analysis, verification, and human review outputs into the final report step.",
+      },
+    ],
+    confidence: 0.91,
+    unresolved_gaps: [],
+    created_at: new Date().toISOString(),
+  },
   prompt_traces: [
     {
       trace_id: "trace_program_demo",
@@ -498,7 +763,7 @@ export const mockTask: TaskRunResponse = {
       viewer_role: "reviewer",
       requested_tier: "structured_reasoning_trace",
       effective_tier: "structured_reasoning_trace",
-      entry_count: 7,
+      entry_count: 9,
       accessed_at: new Date().toISOString(),
     },
   ],
@@ -518,13 +783,14 @@ export const mockTask: TaskRunResponse = {
     headline: "Financial audit reasoning completed",
     verdict: "Qualified",
     key_points: [
+      "Planning scope, assertions, and materiality were established before testing.",
       "Revenue cutoff timing remains the dominant exception.",
       "Verification gates passed before final synthesis.",
     ],
     metrics: [
       { label: "Domain", value: "Financial audit" },
       { label: "Opinion", value: "Qualified" },
-      { label: "Findings", value: "3" },
+      { label: "Findings", value: "4" },
       { label: "Materiality", value: "$625,000" },
     ],
   },
@@ -546,7 +812,7 @@ export const mockTask: TaskRunResponse = {
       {
         timestamp: new Date().toISOString(),
         event: "demo_mode",
-        message: "Offline demo task loaded into the dashboard.",
+        message: "Offline demo task loaded into the dashboard with expanded audit planning and testing nodes.",
       },
     ],
   },
@@ -578,5 +844,46 @@ export const mockTemplates: TemplateSummary[] = [
     template_id: "perform_a_financial_audit_for_invisium_fy_template",
     name: "Financial Audit",
     description: "Audit-oriented template with verification gates, evidence linking, and final synthesis.",
+  },
+];
+
+export const mockSkills: SkillArtifact[] = [
+  {
+    skill_id: "revenue_cutoff_checker",
+    version: "0.1.0",
+    name: "Revenue Cutoff Checker",
+    description: "Validates revenue rows for premature recognition and returns flagged records as JSON.",
+    language: "python",
+    skill_type: "checker",
+    updated_at: new Date().toISOString(),
+    status: "active",
+    entrypoint_filename: "main.py",
+    code: [
+      "import json",
+      "import sys",
+      "",
+      "def main() -> int:",
+      "    raw = sys.stdin.read() or '{}'",
+      "    payload = json.loads(raw)",
+      "    rows = payload.get('rows', [])",
+      "    flagged = [row for row in rows if row.get('recognized_before_shipment')]",
+      "    print(json.dumps({'flagged_rows': flagged, 'flagged_count': len(flagged)}))",
+      "    return 0",
+      "",
+      "if __name__ == '__main__':",
+      "    raise SystemExit(main())",
+    ].join("\n"),
+    test_input: JSON.stringify(
+      {
+        rows: [
+          { invoice_id: "INV-12", recognized_before_shipment: true },
+          { invoice_id: "INV-13", recognized_before_shipment: false },
+        ],
+      },
+      null,
+      2,
+    ),
+    notes: ["Use this on tool or agent nodes that need a quick revenue-cutoff screening pass."],
+    suggested_node_executor: "tool_operator",
   },
 ];

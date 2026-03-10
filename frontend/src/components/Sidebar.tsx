@@ -1,6 +1,7 @@
 import {
   Blocks,
   Clock3,
+  FileCode2,
   LayoutDashboard,
   Moon,
   Orbit,
@@ -12,6 +13,7 @@ import {
 const items = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "reasoning", label: "Reasoning", icon: Orbit },
+  { id: "skills", label: "Skills", icon: FileCode2 },
   { id: "templates", label: "Templates", icon: Blocks },
   { id: "history", label: "History", icon: Clock3 },
   { id: "audit-log", label: "Audit Log", icon: ScrollText },

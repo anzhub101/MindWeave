@@ -16,10 +16,12 @@ from app.models.runtime import (
     EvidenceGraphNode,
     EvidenceReference,
     FindingRecord,
+    GraphDelta,
     GraphPatchRecord,
     GraphVersionRecord,
     GraphEdge,
     GraphNodeState,
+    PlannerTrace,
     PatchDiffRecord,
     PromptTrace,
     ReasoningVisibilityTier,
@@ -34,6 +36,65 @@ class TemplateSummary(BaseModel):
     template_id: str
     name: str
     description: str
+
+
+class DeleteTaskResponse(BaseModel):
+    task_id: str
+    deleted: bool = True
+
+
+class SkillSummary(BaseModel):
+    skill_id: str
+    version: str
+    name: str
+    description: str
+    language: str
+    skill_type: str
+    updated_at: datetime
+    status: str
+
+
+class SkillArtifactResponse(SkillSummary):
+    entrypoint_filename: str
+    code: str
+    test_input: str = ""
+    notes: list[str] = Field(default_factory=list)
+    suggested_node_executor: str = "tool_operator"
+
+
+class SkillGenerateRequest(BaseModel):
+    prompt: str
+    language: str = "python"
+    skill_type: str = "script"
+    existing_code: str = ""
+
+
+class SkillSaveRequest(BaseModel):
+    skill_id: str
+    version: str
+    name: str
+    description: str = ""
+    language: str = "python"
+    skill_type: str = "script"
+    entrypoint_filename: str = "main.py"
+    code: str
+    test_input: str = ""
+
+
+class SkillTestRequest(BaseModel):
+    language: str = "python"
+    entrypoint_filename: str = "main.py"
+    code: str
+    test_input: str = ""
+    args: list[str] = Field(default_factory=list)
+
+
+class SkillTestResponse(BaseModel):
+    passed: bool
+    stdout: str
+    stderr: str
+    exit_code: int
+    command: list[str] = Field(default_factory=list)
 
 
 class ArtifactSummary(BaseModel):
@@ -181,6 +242,8 @@ class TaskRunResponse(BaseModel):
     evidence_graph_nodes: dict[str, EvidenceGraphNode] = Field(default_factory=dict)
     evidence_graph_edges: list[EvidenceGraphEdge] = Field(default_factory=list)
     prompt_traces: list[PromptTrace] = Field(default_factory=list)
+    planner_trace: PlannerTrace | None = None
+    runtime_graph_deltas: list[GraphDelta] = Field(default_factory=list)
     graph_patch_history: list[GraphPatchRecord] = Field(default_factory=list)
     graph_version_history: list[GraphVersionRecord] = Field(default_factory=list)
     patch_diff_history: list[PatchDiffRecord] = Field(default_factory=list)
@@ -258,6 +321,7 @@ class ApplyPlannedChangeRequest(BaseModel):
 class NodeExecutorChangeRequest(BaseModel):
     executor_type: str
     executor_profile: str | None = None
+    skill_artifact_id: str | None = None
     max_child_agents: int = 0
     max_recursion_depth: int = 0
     child_token_budget: int = 0
@@ -267,6 +331,12 @@ class NodeExecutorChangeRequest(BaseModel):
     change_reason: str = ""
     instruction_note: str = ""
     auto_rerun: bool = True
+
+
+class NodePassVerifyRequest(BaseModel):
+    reviewer: str = "dashboard-user"
+    comments: str = ""
+    resume_execution: bool = True
 
 
 class RunDiffRequest(BaseModel):
@@ -323,7 +393,28 @@ class NodeDetailResponse(BaseModel):
     top_evidence: list[EvidenceReference] = Field(default_factory=list)
     finding_records: list[FindingRecord] = Field(default_factory=list)
     approval_state: ApprovalState = Field(default_factory=ApprovalState)
+    approval_reviewers: list[str] = Field(default_factory=list)
     delegated_children: list[str] = Field(default_factory=list)
     delegated_summaries: list[dict[str, Any]] = Field(default_factory=list)
     patch_history: list[GraphPatchRecord] = Field(default_factory=list)
+    reasoning_trace: str | None = None
     technical_details: dict[str, Any] = Field(default_factory=dict)
+
+
+class NodeChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class NodeChatRequest(BaseModel):
+    message: str
+    history: list[NodeChatMessage] = Field(default_factory=list)
+
+
+class NodeChatResponse(BaseModel):
+    task_id: str
+    node_id: str
+    reply: str
+    tool_results: list[dict[str, Any]] = Field(default_factory=list)
+    suggested_actions: list[str] = Field(default_factory=list)
+    model_metadata: dict[str, Any] = Field(default_factory=dict)

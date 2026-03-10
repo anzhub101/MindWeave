@@ -1,15 +1,22 @@
 import type {
   ControlLevel,
+  DeleteTaskResponse,
   DeterminismMode,
+  GraphPatchRequest,
   NodeDetailResponse,
+  NodeChatMessage,
+  NodeChatResponse,
   PlanChangeResponse,
   ReasoningTraceResponse,
-  TraceAccessRole,
   ReasoningVisibilityTier,
   RunDiffResponse,
+  SkillArtifact,
+  SkillSummary,
+  SkillTestResult,
   TaskRunListItem,
   TaskRunResponse,
   TemplateSummary,
+  TraceAccessRole,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
@@ -24,6 +31,7 @@ async function ensureOk(response: Response): Promise<Response> {
 export async function executeTask(
   prompt: string,
   files: File[],
+  sourceUrls: string[],
   deterministicMode: DeterminismMode,
   controlLevel: ControlLevel,
   autoApproveHumanReview: boolean,
@@ -34,7 +42,8 @@ export async function executeTask(
   formData.set("determinism_mode", deterministicMode);
   formData.set("control_level", controlLevel);
   formData.set("auto_approve_human_review", String(autoApproveHumanReview));
-  formData.set("use_sample_data", files.length === 0 ? "true" : "false");
+  formData.set("use_sample_data", "false");
+  formData.set("source_urls", JSON.stringify(sourceUrls));
   files.forEach((file) => formData.append("files", file));
 
   const response = await fetch(`${API_BASE}/tasks/execute`, {
@@ -50,8 +59,106 @@ export async function fetchTasks(): Promise<TaskRunListItem[]> {
   return ensureOk(response).then((result) => result.json());
 }
 
+export async function deleteTask(taskId: string): Promise<DeleteTaskResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}`, {
+    method: "DELETE",
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
 export async function fetchTemplates(): Promise<TemplateSummary[]> {
   const response = await fetch(`${API_BASE}/templates`);
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function fetchSkills(): Promise<SkillSummary[]> {
+  const response = await fetch(`${API_BASE}/skills`);
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function fetchSkill(skillId: string): Promise<SkillArtifact> {
+  const response = await fetch(`${API_BASE}/skills/${skillId}`);
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function generateSkill(payload: {
+  prompt: string;
+  language: string;
+  skill_type: string;
+  existing_code?: string;
+}): Promise<SkillArtifact> {
+  const response = await fetch(`${API_BASE}/skills/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      existing_code: "",
+      ...payload,
+    }),
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function saveSkill(payload: {
+  skill_id: string;
+  version: string;
+  name: string;
+  description: string;
+  language: string;
+  skill_type: string;
+  entrypoint_filename: string;
+  code: string;
+  test_input?: string;
+}): Promise<SkillArtifact> {
+  const response = await fetch(`${API_BASE}/skills`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      test_input: "",
+      ...payload,
+    }),
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function testSkill(payload: {
+  language: string;
+  entrypoint_filename: string;
+  code: string;
+  test_input?: string;
+  args?: string[];
+}): Promise<SkillTestResult> {
+  const response = await fetch(`${API_BASE}/skills/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      test_input: "",
+      args: [],
+      ...payload,
+    }),
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function saveTemplateArtifact(payload: {
+  artifact_id: string;
+  version: string;
+  name: string;
+  description: string;
+  payload: Record<string, unknown>;
+  status?: string;
+  source?: string;
+  justification?: string | null;
+}): Promise<Record<string, unknown>> {
+  const response = await fetch(`${API_BASE}/design/template`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      status: "active",
+      source: "user",
+      justification: null,
+      ...payload,
+    }),
+  });
   return ensureOk(response).then((result) => result.json());
 }
 
@@ -143,12 +250,29 @@ export async function applyPlannedChange(
   return ensureOk(response).then((result) => result.json());
 }
 
+export async function applyGraphPatch(
+  taskId: string,
+  request: GraphPatchRequest,
+): Promise<TaskRunResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/patch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      auto_rerun: true,
+      payload: {},
+      ...request,
+    }),
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
 export async function changeNodeExecutor(
   taskId: string,
   nodeId: string,
   payload: {
     executor_type: string;
     executor_profile?: string | null;
+    skill_artifact_id?: string | null;
     max_child_agents?: number;
     max_recursion_depth?: number;
     child_token_budget?: number;
@@ -171,6 +295,42 @@ export async function changeNodeExecutor(
       child_token_budget: 0,
       delegated_summary_required: false,
       ...payload,
+    }),
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function passAndVerifyNode(
+  taskId: string,
+  nodeId: string,
+  reviewer = "dashboard-user",
+  comments = "",
+  resumeExecution = true,
+): Promise<TaskRunResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/nodes/${nodeId}/pass-verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      reviewer,
+      comments,
+      resume_execution: resumeExecution,
+    }),
+  });
+  return ensureOk(response).then((result) => result.json());
+}
+
+export async function chatWithNode(
+  taskId: string,
+  nodeId: string,
+  message: string,
+  history: NodeChatMessage[],
+): Promise<NodeChatResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/nodes/${nodeId}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message,
+      history,
     }),
   });
   return ensureOk(response).then((result) => result.json());

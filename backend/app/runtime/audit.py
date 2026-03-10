@@ -53,13 +53,20 @@ class AuditStore:
             "source_documents": [document.model_dump(mode="json") for document in state.source_documents],
             "final_output": state.final_output,
             "final_summary": state.final_summary,
+            "planner_trace": state.planner_trace.model_dump(mode="json") if state.planner_trace is not None else None,
             "grs": state.model_dump(mode="json"),
+            "node_reasoning_traces": {
+                node.id: node.reasoning_trace
+                for node in state.nodes.values()
+                if isinstance(node.reasoning_trace, str) and node.reasoning_trace.strip()
+            },
             "verification_logs": [entry.model_dump(mode="json") for entry in state.verification_logs],
             "review_history": [entry.model_dump(mode="json") for entry in state.review_history],
             "evaluation_logs": [entry.model_dump(mode="json") for entry in state.evaluation_logs],
             "schema_validation_logs": [entry.model_dump(mode="json") for entry in state.schema_validation_logs],
             "event_log": [entry.model_dump(mode="json") for entry in state.logs],
             "graph_patch_history": [entry.model_dump(mode="json") for entry in state.graph_patch_history],
+            "runtime_graph_deltas": [entry.model_dump(mode="json") for entry in state.runtime_graph_deltas],
             "graph_version_history": [entry.model_dump(mode="json") for entry in state.graph_version_history],
             "patch_diff_history": [entry.model_dump(mode="json") for entry in state.patch_diff_history],
             "trace_access_history": [entry.model_dump(mode="json") for entry in state.trace_access_history],

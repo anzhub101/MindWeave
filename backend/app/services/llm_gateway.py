@@ -121,6 +121,46 @@ class MockProvider:
                     "template_name": "Generated Reasoning Template",
                     "domain": "general reasoning",
                     "mapping_explanation": "Deterministic fallback synthesized a generic reasoning program from the prompt.",
+                    "planner_trace": {
+                        "summary": "Selected a scoped analysis graph with a verification branch before final synthesis.",
+                        "graph_shape_reason": "A linear scope-to-evidence flow with an explicit verification gate keeps the graph auditable and bounded.",
+                        "evidence_sources_available": [
+                            {
+                                "source_id": "requirements_reference",
+                                "source_type": "requirements_reference",
+                                "label": "Requirements Reference",
+                                "detail": "Planning requirements used to shape the graph.",
+                            }
+                        ],
+                        "web_fallback_used": False,
+                        "web_search_queries": [],
+                        "candidate_graph_operations": [
+                            {
+                                "operation": "linear_scope_mapping",
+                                "disposition": "selected",
+                                "rationale": "A scope node followed by evidence mapping keeps early context explicit.",
+                            },
+                            {
+                                "operation": "branch_for_verification",
+                                "disposition": "selected",
+                                "rationale": "A verify branch was preserved before synthesis to enforce grounded outputs.",
+                            },
+                        ],
+                        "node_decisions": [
+                            {
+                                "node_id": "scope_definition",
+                                "action": "added",
+                                "reason": "The graph needs a first-class scope node to restate the user objective.",
+                            },
+                            {
+                                "node_id": "verification_gate",
+                                "action": "branched",
+                                "reason": "Verification was separated from analysis so synthesis can be explicitly guarded.",
+                            },
+                        ],
+                        "confidence": 0.82,
+                        "unresolved_gaps": [],
+                    },
                     "program": {
                         "program_id": program_id,
                         "version": "1.0.0",
@@ -267,6 +307,7 @@ class MockProvider:
             summary = f"Completed {node_id.replace('_', ' ')}."
             payload: dict[str, Any] = {
                 "summary": summary,
+                "reasoning": f"Reviewed the {operation_type} node, aligned it to the requested scope, and grounded the response in the retrieved evidence identifiers.",
                 "output": {
                     "node": node_id,
                     "insight": f"Deterministic mock output for {operation_type}.",
@@ -323,6 +364,48 @@ class MockProvider:
         if request.task == "json_repair":
             raw = request.context.get("raw_text", "{}")
             return raw if isinstance(raw, str) else json.dumps(raw)
+
+        if request.task == "skill_generation":
+            user_prompt = str(request.context.get("user_prompt", "generated skill"))
+            language = str(request.context.get("language", "python")).lower()
+            entrypoint_filename = "main.js" if language in {"javascript", "js", "typescript", "ts"} else "main.py"
+            if language in {"javascript", "js", "typescript", "ts"}:
+                code = (
+                    "const fs = require('fs');\n"
+                    "const raw = fs.readFileSync(0, 'utf8').trim();\n"
+                    "const payload = raw ? JSON.parse(raw) : {};\n"
+                    "console.log(JSON.stringify({ status: 'ok', skill: 'generated', received: payload }));\n"
+                )
+            else:
+                code = (
+                    "import json\n"
+                    "import sys\n\n"
+                    "raw = sys.stdin.read().strip()\n"
+                    "payload = json.loads(raw) if raw else {}\n"
+                    "print(json.dumps({'status': 'ok', 'skill': 'generated', 'received': payload}))\n"
+                )
+            return json.dumps(
+                {
+                    "name": "Generated Skill",
+                    "description": f"Skill generated for: {user_prompt[:80]}",
+                    "language": language,
+                    "skill_type": str(request.context.get("skill_type", "script")),
+                    "entrypoint_filename": entrypoint_filename,
+                    "code": code,
+                    "test_input": json.dumps({"message": "hello"}),
+                    "notes": ["Mock provider returned a deterministic skill scaffold."],
+                }
+            )
+
+        if request.task == "node_chat":
+            node_title = str(request.context.get("node_title", "node"))
+            user_message = str(request.context.get("user_message", ""))
+            tool_results = request.context.get("tool_results", [])
+            tool_note = " Tool output was included." if tool_results else ""
+            return (
+                f"{node_title}: I grounded this reply in the current node state and linked evidence.{tool_note} "
+                f"Question received: {user_message}"
+            )
 
         return "Deterministic completion."
 
@@ -417,7 +500,7 @@ class K2Provider:
         if request.seed is not None:
             payload["seed"] = request.seed
 
-        url = self.chat_url
+        url = self.agent_url if request.agentic and self.agent_url else self.chat_url
         response = httpx.post(
             url,
             headers={
@@ -472,9 +555,9 @@ class LLMGateway:
     def __init__(self) -> None:
         self.settings = get_settings()
         settings = self.settings
-        if settings.llm_provider == "k2" and settings.k2_api_key:
+        if settings.llm_provider == "k2" and settings.resolved_k2_api_key:
             self.provider = K2Provider(
-                api_key=settings.k2_api_key,
+                api_key=settings.resolved_k2_api_key,
                 model=settings.k2_model,
                 chat_url=settings.k2_chat_base_url,
                 agent_url=settings.k2_agent_base_url,

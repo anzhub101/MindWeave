@@ -94,9 +94,18 @@ class ValidationBridge:
             "high"
             if patch_type in {"remove_node", "rewire_dependency", "change_executor", "change_policy"}
             else "medium"
-            if patch_type in {"add_node", "expand_node", "change_evidence_scope", "change_budget"}
+            if patch_type in {"add_node", "expand_node", "change_evidence_scope", "change_budget", "insert_node_between"}
             else "low"
         )
+        affected_nodes = [target_node_id] if target_node_id else []
+        if patch_type == "insert_node_between":
+            source_node_id = str((payload or {}).get("source_node_id") or "")
+            explicit_target_id = str((payload or {}).get("target_node_id") or "")
+            affected_nodes = [
+                node_id
+                for node_id in {source_node_id, explicit_target_id, target_node_id}
+                if node_id
+            ]
         proposal = PatchProposal(
             proposal_id=f"direct_{patch_type}",
             intent_id="direct_patch",
@@ -110,7 +119,7 @@ class ValidationBridge:
             ],
             summary=f"Direct patch {patch_type}",
             explanation="Validation wrapper for direct graph patch application.",
-            affected_node_ids=[target_node_id] if target_node_id else [],
+            affected_node_ids=affected_nodes,
             rerun_scope="subtree" if patch_type == "rerun_subtree" else "none",
             risk_level=risk_level,
             requires_approval=state.control_level in {ControlLevel.regulated, ControlLevel.strict_audit}

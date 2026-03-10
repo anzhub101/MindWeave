@@ -16,6 +16,52 @@ export interface TemplateSummary {
   description: string;
 }
 
+export interface DeleteTaskResponse {
+  task_id: string;
+  deleted: boolean;
+}
+
+export interface SkillSummary {
+  skill_id: string;
+  version: string;
+  name: string;
+  description: string;
+  language: string;
+  skill_type: string;
+  updated_at: string;
+  status: string;
+}
+
+export interface SkillArtifact extends SkillSummary {
+  entrypoint_filename: string;
+  code: string;
+  test_input: string;
+  notes: string[];
+  suggested_node_executor: string;
+}
+
+export interface SkillTestResult {
+  passed: boolean;
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  command: string[];
+}
+
+export interface NodeChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface NodeChatResponse {
+  task_id: string;
+  node_id: string;
+  reply: string;
+  tool_results: Array<Record<string, unknown>>;
+  suggested_actions: string[];
+  model_metadata: Record<string, unknown>;
+}
+
 export interface DocumentRecord {
   id: string;
   name: string;
@@ -78,6 +124,7 @@ export interface GraphNode {
   finding_records?: FindingRecord[];
   inputs: Record<string, unknown>;
   output: Record<string, unknown>;
+  reasoning_trace?: string | null;
   executor_type?: string;
   executor_profile?: string | null;
   max_child_agents?: number;
@@ -95,11 +142,20 @@ export interface GraphNode {
   required_approvals?: number;
   metadata: {
     layout?: {
-      column: number;
-      row: number;
+      column?: number;
+      row?: number;
+      placement?: string;
+      reference_node_id?: string;
+      parent_node_id?: string;
+      sibling_index?: number;
+      sibling_count?: number;
     };
+    skill_artifact_id?: string;
     [key: string]: unknown;
   };
+  created_at?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
   latency_ms: number | null;
 }
 
@@ -161,6 +217,41 @@ export interface PromptTrace {
   created_at: string;
 }
 
+export interface PlannerEvidenceSource {
+  source_id: string;
+  source_type: string;
+  label: string;
+  detail: string;
+  url?: string | null;
+}
+
+export interface PlannerCandidateOperation {
+  operation: string;
+  disposition: string;
+  rationale: string;
+  target_node_id?: string | null;
+}
+
+export interface PlannerNodeDecision {
+  node_id: string;
+  action: string;
+  reason: string;
+}
+
+export interface PlannerTrace {
+  trace_id: string;
+  summary: string;
+  graph_shape_reason: string;
+  evidence_sources_available: PlannerEvidenceSource[];
+  web_fallback_used: boolean;
+  web_search_queries: string[];
+  candidate_graph_operations: PlannerCandidateOperation[];
+  node_decisions: PlannerNodeDecision[];
+  confidence?: number | null;
+  unresolved_gaps: string[];
+  created_at: string;
+}
+
 export interface GraphPatchRecord {
   patch_id: string;
   patch_type: string;
@@ -172,6 +263,16 @@ export interface GraphPatchRecord {
   resulting_program_version: string;
   auto_rerun: boolean;
   applied_at: string;
+}
+
+export interface GraphPatchRequest {
+  patch_type: string;
+  target_node_id?: string | null;
+  change_reason: string;
+  requested_by: string;
+  approved_by?: string | null;
+  payload?: Record<string, unknown>;
+  auto_rerun?: boolean;
 }
 
 export interface GraphVersionRecord {
@@ -241,6 +342,7 @@ export interface TaskRunResponse {
   evidence_graph_nodes?: Record<string, EvidenceGraphNode>;
   evidence_graph_edges?: EvidenceGraphEdge[];
   prompt_traces?: PromptTrace[];
+  planner_trace?: PlannerTrace | null;
   graph_patch_history?: GraphPatchRecord[];
   graph_version_history?: GraphVersionRecord[];
   patch_diff_history?: PatchDiffRecord[];
@@ -273,9 +375,11 @@ export interface NodeDetailResponse {
   top_evidence: EvidenceReference[];
   finding_records: FindingRecord[];
   approval_state: ApprovalState;
+  approval_reviewers: string[];
   delegated_children: string[];
   delegated_summaries: Array<Record<string, unknown>>;
   patch_history: GraphPatchRecord[];
+  reasoning_trace?: string | null;
   technical_details: Record<string, unknown>;
 }
 

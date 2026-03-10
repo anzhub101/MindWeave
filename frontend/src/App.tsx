@@ -1,17 +1,26 @@
 import { useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import { X } from "lucide-react";
 import {
+  applyGraphPatch,
   applyPlannedChange,
+  chatWithNode,
   changeNodeExecutor,
+  deleteTask,
   diffTaskRuns,
   fetchAuditPackage,
   fetchNodeDetail,
+  fetchSkill,
+  fetchSkills,
   fetchReasoningTrace,
   fetchTask,
   fetchTasks,
   fetchTemplates,
+  generateSkill,
+  passAndVerifyNode,
+  saveSkill,
+  saveTemplateArtifact,
+  testSkill,
   executeTask,
-  planNodeChange,
   planTaskChange,
   replayTask,
   submitReview,
@@ -24,17 +33,24 @@ import { OperationsView } from "./components/OperationsView";
 import { PromptComposer } from "./components/PromptComposer";
 import { RunWorkbenchPanel } from "./components/RunWorkbenchPanel";
 import { Sidebar } from "./components/Sidebar";
+import { SkillsStudio } from "./components/SkillsStudio";
 import { SummaryCard } from "./components/SummaryCard";
-import { mockHistory, mockTask, mockTemplates } from "./mockData";
+import { mockHistory, mockSkills, mockTask, mockTemplates } from "./mockData";
 import type {
   ControlLevel,
   DeterminismMode,
+  GraphPatchRequest,
   GraphNode,
+  NodeChatMessage,
+  NodeChatResponse,
   NodeDetailResponse,
   PlanChangeResponse,
   ReasoningTraceResponse,
   ReasoningVisibilityTier,
   RunDiffResponse,
+  SkillArtifact,
+  SkillSummary,
+  SkillTestResult,
   TaskRunListItem,
   TaskRunResponse,
   TemplateSummary,
@@ -58,17 +74,421 @@ function formatError(error: unknown) {
   return "The requested operation could not be completed.";
 }
 
+function slugifyTemplateId(value: string) {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "saved_template"
+  );
+}
+
+function inferTemplateKeywords(task: TaskRunResponse) {
+  const promptTokens = task.prompt
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((token) => token.length > 3);
+  return Array.from(new Set([task.domain, ...promptTokens])).slice(0, 8);
+}
+
+function slugifySkillId(value: string) {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "generated_skill"
+  );
+}
+
+function defaultEntrypointFilename(language: string) {
+  return language === "javascript" ? "main.js" : "main.py";
+}
+
+function createBlankSkillDraft(overrides: Partial<SkillArtifact> = {}): SkillArtifact {
+  const language = overrides.language ?? "python";
+  const name = overrides.name ?? "New Skill";
+  return {
+    skill_id: overrides.skill_id ?? slugifySkillId(name),
+    version: overrides.version ?? "0.1.0",
+    name,
+    description: overrides.description ?? "",
+    language,
+    skill_type: overrides.skill_type ?? "script",
+    updated_at: overrides.updated_at ?? new Date().toISOString(),
+    status: overrides.status ?? "draft",
+    entrypoint_filename: overrides.entrypoint_filename ?? defaultEntrypointFilename(language),
+    code: overrides.code ?? "",
+    test_input: overrides.test_input ?? "",
+    notes: overrides.notes ?? [],
+    suggested_node_executor: overrides.suggested_node_executor ?? "tool_operator",
+  };
+}
+
+function nodeChatKey(taskId: string, nodeId: string) {
+  return `${taskId}:${nodeId}`;
+}
+
+function parseSourceUrls(value: string) {
+  return value
+    .split(/\n|,/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function nodeLabelList(task: TaskRunResponse, nodeIds: string[]) {
+  if (!nodeIds.length) {
+    return "none";
+  }
+  const labels = nodeIds.map((nodeId) => task.nodes.find((node) => node.id === nodeId)?.title ?? nodeId);
+  if (labels.length === 1) {
+    return labels[0];
+  }
+  if (labels.length === 2) {
+    return `${labels[0]} and ${labels[1]}`;
+  }
+  return `${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}`;
+}
+
+function isWhyNodeCreatedQuestion(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("why was this node created") ||
+    normalized.includes("why was this created") ||
+    normalized.includes("why does this node exist") ||
+    normalized.includes("why this node") ||
+    normalized.includes("purpose of this node")
+  );
+}
+
+function buildDemoNodeCreationAnswer(
+  node: GraphNode,
+  task: TaskRunResponse,
+  nodeDetail: NodeDetailResponse | null,
+) {
+  const explicitReason =
+    typeof node.metadata?.demo_explanation === "string" && node.metadata.demo_explanation.trim()
+      ? node.metadata.demo_explanation.trim()
+      : node.instruction.replace(/\.$/, "").toLowerCase();
+  const parentSummary = node.depends_on.length
+    ? `It comes after ${nodeLabelList(task, node.depends_on)} so the graph can use that earlier work as a prerequisite.`
+    : "It is at the front of the graph because the audit needs this context before any downstream testing can happen.";
+  const childSummary = node.next_nodes.length
+    ? `Its output then feeds ${nodeLabelList(task, node.next_nodes)}.`
+    : "It is terminal because this is where the graph consolidates the audit conclusion.";
+  const evidenceRefs = nodeDetail?.top_evidence?.length ? nodeDetail.top_evidence : node.evidence_refs;
+  const evidenceSummary = evidenceRefs.length
+    ? `It is primarily anchored to ${evidenceRefs
+        .slice(0, 2)
+        .map((reference) => reference.document_name || reference.document_id)
+        .join(" and ")}.`
+    : "It currently has no direct evidence links in the demo payload.";
+  const approvalSummary =
+    (node.approval_state?.required_approvals ?? 0) > 0
+      ? `It also carries a review checkpoint because ${node.title.toLowerCase()} affects the final audit conclusion.`
+      : "";
+
+  return `${node.title} was created to ${explicitReason}. ${parentSummary} ${childSummary} ${evidenceSummary} ${approvalSummary}`.replace(
+    /\s+/g,
+    " ",
+  );
+}
+
+function buildDemoCopilotReply(
+  node: GraphNode,
+  task: TaskRunResponse,
+  nodeDetail: NodeDetailResponse | null,
+  message: string,
+) {
+  const normalized = message.toLowerCase();
+  if (isWhyNodeCreatedQuestion(normalized)) {
+    return buildDemoNodeCreationAnswer(node, task, nodeDetail);
+  }
+  if (normalized.includes("evidence") || normalized.includes("support")) {
+    const references = (nodeDetail?.top_evidence?.length ? nodeDetail.top_evidence : node.evidence_refs).slice(0, 3);
+    if (!references.length) {
+      return `${node.title} does not have explicit evidence links in the demo payload, so I would treat it as a planning or orchestration node and ask for supporting audit evidence before relying on it.`;
+    }
+    return `${node.title} is supported by ${references
+      .map((reference) => reference.document_name || reference.document_id)
+      .join(", ")}. Those sources anchor the node's conclusion and explain why it sits where it does in the audit flow.`;
+  }
+  return `${buildDemoNodeCreationAnswer(node, task, nodeDetail)} If you want, ask about the evidence, the downstream impact, or why this node uses ${node.executor_type ?? "llm_operator"} execution.`;
+}
+
+function nextOfflineProgramVersion(version: string) {
+  const match = version.match(/^(.*?)-offline\.(\d+)$/);
+  if (match) {
+    return `${match[1]}-offline.${Number(match[2]) + 1}`;
+  }
+  return `${version}-offline.1`;
+}
+
+function replaceNodeReference(values: string[], fromId: string, toId: string) {
+  return values.map((value) => (value === fromId ? toId : value));
+}
+
+function appendUnique(values: string[], nextValue: string) {
+  return values.includes(nextValue) ? values : [...values, nextValue];
+}
+
+function removeEdge(edges: Array<{ source: string; target: string; kind: string }>, source: string, target: string) {
+  return edges.filter((edge) => !(edge.source === source && edge.target === target));
+}
+
+function upsertEdge(
+  edges: Array<{ source: string; target: string; kind: string }>,
+  source: string,
+  target: string,
+  kind: string,
+) {
+  if (edges.some((edge) => edge.source === source && edge.target === target)) {
+    return edges;
+  }
+  return [...edges, { source, target, kind }];
+}
+
+function buildOfflineNode(nodePayload: Record<string, unknown>, fallbackId: string): GraphNode {
+  const requiredApprovals = Number(nodePayload.required_approvals ?? 0);
+  return {
+    id: String(nodePayload.id ?? fallbackId),
+    title: String(nodePayload.title ?? "Manual Node"),
+    subtitle: String(nodePayload.subtitle ?? "Offline graph edit"),
+    operation_type: String(nodePayload.operation_type ?? "analyze"),
+    instruction: String(nodePayload.instruction ?? ""),
+    success_criteria: Array.isArray(nodePayload.success_criteria)
+      ? nodePayload.success_criteria.map((value) => String(value))
+      : [],
+    evaluation_ids: Array.isArray(nodePayload.evaluation_ids)
+      ? nodePayload.evaluation_ids.map((value) => String(value))
+      : [],
+    priority: Number(nodePayload.priority ?? 100),
+    status: "pending",
+    verification_status: "pending",
+    verification_checks: [],
+    depends_on: [],
+    guarded_by: [],
+    next_nodes: [],
+    evidence_refs: [],
+    finding_records: [],
+    inputs: {},
+    output: {},
+    executor_type: String(nodePayload.executor_type ?? "llm_operator"),
+    executor_profile: nodePayload.executor_profile ? String(nodePayload.executor_profile) : null,
+    max_child_agents: Number(nodePayload.max_child_agents ?? 0),
+    max_recursion_depth: Number(nodePayload.max_recursion_depth ?? 0),
+    child_token_budget: Number(nodePayload.child_token_budget ?? 0),
+    expansion_contracts: Array.isArray(nodePayload.expansion_contracts)
+      ? nodePayload.expansion_contracts.map((value) => String(value))
+      : [],
+    delegated_summary_required: Boolean(nodePayload.delegated_summary_required),
+    thought_summary: "",
+    evaluation_score: null,
+    approval_state: {
+      required_approvals: requiredApprovals,
+      approved_count: 0,
+      pending_approvals: requiredApprovals,
+      requires_human_review: requiredApprovals > 0,
+      status: requiredApprovals > 0 ? "pending" : "not_required",
+    },
+    evidence_scope:
+      nodePayload.evidence_scope && typeof nodePayload.evidence_scope === "object"
+        ? (nodePayload.evidence_scope as Record<string, unknown>)
+        : {},
+    model_metadata: {},
+    delegated_children: [],
+    patch_history: [],
+    required_approvals: requiredApprovals,
+    metadata:
+      nodePayload.metadata && typeof nodePayload.metadata === "object"
+        ? ({ ...(nodePayload.metadata as Record<string, unknown>) } as GraphNode["metadata"])
+        : {},
+    latency_ms: null,
+  };
+}
+
+function applyOfflineGraphPatch(task: TaskRunResponse, request: GraphPatchRequest): TaskRunResponse {
+  const nextTask = structuredClone(task);
+  const payload = (request.payload ?? {}) as Record<string, unknown>;
+  const nodePayload = (payload.node ?? {}) as Record<string, unknown>;
+  const nodeId = String(nodePayload.id ?? request.target_node_id ?? `manual_${Date.now()}`);
+  const newNode = buildOfflineNode(nodePayload, nodeId);
+  const nodesById = new Map(nextTask.nodes.map((node) => [node.id, node]));
+  const edges = [...nextTask.edges];
+
+  function insertNodeAfter(referenceNodeId: string) {
+    const reference = nodesById.get(referenceNodeId);
+    if (!reference) {
+      throw new Error(`Reference node ${referenceNodeId} was not found.`);
+    }
+    const downstream = [...reference.next_nodes];
+    newNode.depends_on = [referenceNodeId];
+    newNode.next_nodes = downstream;
+    reference.next_nodes = [newNode.id];
+    let nextEdges = upsertEdge(edges, referenceNodeId, newNode.id, "execution");
+    for (const targetId of downstream) {
+      const target = nodesById.get(targetId);
+      if (target) {
+        target.depends_on = replaceNodeReference(target.depends_on, referenceNodeId, newNode.id);
+      }
+      nextEdges = removeEdge(nextEdges, referenceNodeId, targetId);
+      nextEdges = upsertEdge(nextEdges, newNode.id, targetId, "execution");
+    }
+    nextTask.edges = nextEdges;
+  }
+
+  function insertNodeBefore(referenceNodeId: string) {
+    const reference = nodesById.get(referenceNodeId);
+    if (!reference) {
+      throw new Error(`Reference node ${referenceNodeId} was not found.`);
+    }
+    const parents = [...reference.depends_on];
+    newNode.depends_on = parents;
+    newNode.next_nodes = [referenceNodeId];
+    reference.depends_on = [newNode.id];
+    let nextEdges = upsertEdge(edges, newNode.id, referenceNodeId, "execution");
+    for (const parentId of parents) {
+      const parent = nodesById.get(parentId);
+      if (parent) {
+        parent.next_nodes = replaceNodeReference(parent.next_nodes, referenceNodeId, newNode.id);
+      }
+      nextEdges = removeEdge(nextEdges, parentId, referenceNodeId);
+      nextEdges = upsertEdge(nextEdges, parentId, newNode.id, "execution");
+    }
+    nextTask.edges = nextEdges;
+  }
+
+  function branchFrom(referenceNodeId: string) {
+    const reference = nodesById.get(referenceNodeId);
+    if (!reference) {
+      throw new Error(`Reference node ${referenceNodeId} was not found.`);
+    }
+    newNode.depends_on = [referenceNodeId];
+    reference.next_nodes = appendUnique(reference.next_nodes, newNode.id);
+    nextTask.edges = upsertEdge(edges, referenceNodeId, newNode.id, "manual_branch");
+  }
+
+  function insertBetween(sourceNodeId: string, targetNodeId: string) {
+    const source = nodesById.get(sourceNodeId);
+    const target = nodesById.get(targetNodeId);
+    if (!source || !target) {
+      throw new Error("The requested edge endpoints were not found.");
+    }
+    newNode.depends_on = [sourceNodeId];
+    newNode.next_nodes = [targetNodeId];
+    source.next_nodes = replaceNodeReference(source.next_nodes, targetNodeId, newNode.id);
+    target.depends_on = replaceNodeReference(target.depends_on, sourceNodeId, newNode.id);
+    let nextEdges = removeEdge(edges, sourceNodeId, targetNodeId);
+    nextEdges = upsertEdge(nextEdges, sourceNodeId, newNode.id, "execution");
+    nextEdges = upsertEdge(nextEdges, newNode.id, targetNodeId, "execution");
+    nextTask.edges = nextEdges;
+  }
+
+  if (request.patch_type === "add_node") {
+    const placement = String(payload.placement ?? "after_node");
+    const referenceNodeId = String(payload.reference_node_id ?? request.target_node_id ?? "");
+    if (placement === "before_node") {
+      insertNodeBefore(referenceNodeId);
+    } else if (placement === "branch_from") {
+      branchFrom(referenceNodeId);
+    } else {
+      insertNodeAfter(referenceNodeId);
+    }
+  } else if (request.patch_type === "insert_node_between") {
+    insertBetween(String(payload.source_node_id ?? ""), String(payload.target_node_id ?? request.target_node_id ?? ""));
+  } else {
+    throw new Error(`Offline mode only supports manual node insertion right now.`);
+  }
+
+  nextTask.nodes.push(newNode);
+  nextTask.program_version = nextOfflineProgramVersion(nextTask.program_version);
+  nextTask.graph_patch_history = [
+    ...(nextTask.graph_patch_history ?? []),
+    {
+      patch_id: `offline_patch_${Date.now()}`,
+      patch_type: request.patch_type,
+      target_node_id: request.target_node_id ?? null,
+      change_reason: request.change_reason,
+      requested_by: request.requested_by,
+      approved_by: request.approved_by ?? null,
+      payload: request.payload ?? {},
+      resulting_program_version: nextTask.program_version,
+      auto_rerun: request.auto_rerun ?? true,
+      applied_at: new Date().toISOString(),
+    },
+  ];
+  return nextTask;
+}
+
+function buildTemplatePayload(task: TaskRunResponse) {
+  const fallbackPayload = {
+    program_id: task.program_id,
+    version: task.program_version,
+    template_id: task.template_id,
+    domain: task.domain,
+    goal: task.prompt,
+    policy: "priority_based",
+    budget: {
+      max_nodes: Math.max(task.nodes.length + 4, 12),
+      max_tokens: 20000,
+      max_runtime_seconds: 600,
+    },
+    convergence_rule: "verification_passed_and_output_ready",
+    output_schema: "task_final_output",
+    nodes: task.nodes.map((node) => ({
+      id: node.id,
+      title: node.title,
+      subtitle: node.subtitle,
+      operation_type: node.operation_type,
+      instruction: node.instruction,
+      success_criteria: node.success_criteria,
+      evaluation_ids: node.evaluation_ids,
+      priority: node.priority,
+      executor_type: node.executor_type ?? "llm_operator",
+      max_child_agents: node.max_child_agents ?? 0,
+      max_recursion_depth: node.max_recursion_depth ?? 0,
+      expansion_contracts: node.expansion_contracts ?? [],
+      required_approvals: node.required_approvals ?? 0,
+      depends_on: node.depends_on,
+      next: node.next_nodes,
+      guarded_by: node.guarded_by,
+      metadata: node.metadata,
+      })),
+  };
+  const blueprint = (task.program_blueprint ? structuredClone(task.program_blueprint) : fallbackPayload) as Record<string, unknown>;
+  const metadata =
+    blueprint.metadata && typeof blueprint.metadata === "object" && !Array.isArray(blueprint.metadata)
+      ? ({ ...blueprint.metadata } as Record<string, unknown>)
+      : {};
+  if (task.planner_trace) {
+    metadata.planner_trace = task.planner_trace;
+  }
+  blueprint.metadata = metadata;
+  return blueprint;
+}
+
 export default function App() {
   const [activeItem, setActiveItem] = useState("reasoning");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [activeReasoningModal, setActiveReasoningModal] = useState<"compose" | "workbench" | null>(null);
-  const [rightPanelWidth, setRightPanelWidth] = useState(368);
+  const [rightPanelWidth, setRightPanelWidth] = useState(550);
   const [prompt, setPrompt] = useState(mockTask.prompt);
+  const [sourceUrlsText, setSourceUrlsText] = useState("");
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [task, setTask] = useState<TaskRunResponse>(mockTask);
   const [history, setHistory] = useState<TaskRunListItem[]>(mockHistory);
   const [templates, setTemplates] = useState<TemplateSummary[]>(mockTemplates);
+  const [skills, setSkills] = useState<SkillSummary[]>(mockSkills);
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(mockSkills[0]?.skill_id ?? null);
+  const [skillDraft, setSkillDraft] = useState<SkillArtifact>(createBlankSkillDraft(mockSkills[0] ?? {}));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedNodeDetail, setSelectedNodeDetail] = useState<NodeDetailResponse | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -76,16 +496,28 @@ export default function App() {
   const [isApplyingPlannedChange, setIsApplyingPlannedChange] = useState(false);
   const [isLoadingTask, setIsLoadingTask] = useState(false);
   const [isLoadingNodeDetail, setIsLoadingNodeDetail] = useState(false);
+  const [isLoadingSkills, setIsLoadingSkills] = useState(false);
   const [isReplayingTask, setIsReplayingTask] = useState(false);
   const [isLoadingTrace, setIsLoadingTrace] = useState(false);
   const [isDiffingRuns, setIsDiffingRuns] = useState(false);
   const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
+  const [isSavingTemplate, setIsSavingTemplate] = useState(false);
+  const [isSavingSkill, setIsSavingSkill] = useState(false);
+  const [isGeneratingSkill, setIsGeneratingSkill] = useState(false);
+  const [isTestingSkill, setIsTestingSkill] = useState(false);
+  const [isPassingNode, setIsPassingNode] = useState(false);
+  const [isSendingNodeChat, setIsSendingNodeChat] = useState(false);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [offlineDemo, setOfflineDemo] = useState(true);
   const [determinismMode, setDeterminismMode] = useState<DeterminismMode>("best_effort_deterministic");
   const [controlLevel, setControlLevel] = useState<ControlLevel>("operational");
   const [autoApproveHumanReview, setAutoApproveHumanReview] = useState(true);
   const [plannedChange, setPlannedChange] = useState<PlanChangeResponse | null>(null);
   const [reasoningTrace, setReasoningTrace] = useState<ReasoningTraceResponse | null>(null);
+  const [skillTestResult, setSkillTestResult] = useState<SkillTestResult | null>(null);
+  const [skillNotice, setSkillNotice] = useState<{ tone: "info" | "error"; message: string } | null>(null);
+  const [nodeChatThreads, setNodeChatThreads] = useState<Record<string, NodeChatMessage[]>>({});
+  const [nodeChatResults, setNodeChatResults] = useState<Record<string, NodeChatResponse | null>>({});
   const [traceTier, setTraceTier] = useState<ReasoningVisibilityTier>("structured_reasoning_trace");
   const [traceViewerRole, setTraceViewerRole] = useState<TraceAccessRole>("reviewer");
   const [traceViewerId, setTraceViewerId] = useState("dashboard-user");
@@ -111,37 +543,55 @@ export default function App() {
     let cancelled = false;
 
     async function loadInitialData() {
-      try {
-        setIsLoadingTemplates(true);
-        const [tasks, availableTemplates] = await Promise.all([
-          fetchTasks(),
-          fetchTemplates().catch(() => mockTemplates),
-        ]);
-        if (cancelled) {
-          return;
-        }
-        setHistory(tasks);
-        setTemplates(availableTemplates);
-        setOfflineDemo(false);
-        if (tasks.length > 0) {
-          const latestTask = await fetchTask(tasks[0].task_id);
-          if (cancelled) {
-            return;
-          }
-          syncTaskState(latestTask);
-        }
-      } catch {
-        if (cancelled) {
-          return;
-        }
-        setHistory(mockHistory);
+      setIsLoadingTemplates(true);
+      setIsLoadingSkills(true);
+      const [tasksResult, templatesResult, skillsResult] = await Promise.allSettled([
+        fetchTasks(),
+        fetchTemplates(),
+        fetchSkills(),
+      ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (templatesResult.status === "fulfilled") {
+        setTemplates(templatesResult.value);
+      } else {
         setTemplates(mockTemplates);
+      }
+
+      if (skillsResult.status === "fulfilled") {
+        setSkills(skillsResult.value);
+      } else {
+        setSkills(mockSkills);
+      }
+
+      if (tasksResult.status === "fulfilled") {
+        setHistory(tasksResult.value);
+        setOfflineDemo(false);
+        if (tasksResult.value.length > 0) {
+          try {
+            const latestTask = await fetchTask(tasksResult.value[0].task_id);
+            if (!cancelled) {
+              syncTaskState(latestTask);
+            }
+          } catch {
+            if (!cancelled) {
+              setTask(mockTask);
+              setOfflineDemo(true);
+            }
+          }
+        }
+      } else {
+        setHistory(mockHistory);
         setTask(mockTask);
         setOfflineDemo(true);
-      } finally {
-        if (!cancelled) {
-          setIsLoadingTemplates(false);
-        }
+      }
+
+      if (!cancelled) {
+        setIsLoadingTemplates(false);
+        setIsLoadingSkills(false);
       }
     }
 
@@ -192,6 +642,46 @@ export default function App() {
     setRunDiff(null);
     setCompareTaskId((current) => (current === task.task_id ? "" : current));
   }, [task.task_id, selectedNodeId]);
+
+  useEffect(() => {
+    if (activeItem !== "reasoning") {
+      setActiveReasoningModal(null);
+    }
+  }, [activeItem]);
+
+  useEffect(() => {
+    setNodeChatThreads({});
+    setNodeChatResults({});
+  }, [task.task_id]);
+
+  useEffect(() => {
+    if (skills.some((skill) => skill.skill_id === selectedSkillId)) {
+      return;
+    }
+    const firstSkill = skills[0] ?? null;
+    setSelectedSkillId(firstSkill?.skill_id ?? null);
+    if (!firstSkill) {
+      setSkillDraft(createBlankSkillDraft());
+      return;
+    }
+    if (offlineDemo) {
+      const mockSkill = mockSkills.find((skill) => skill.skill_id === firstSkill.skill_id);
+      setSkillDraft(createBlankSkillDraft(mockSkill ?? firstSkill));
+    } else {
+      setSkillDraft(
+        createBlankSkillDraft({
+          skill_id: firstSkill.skill_id,
+          version: firstSkill.version,
+          name: firstSkill.name,
+          description: firstSkill.description,
+          language: firstSkill.language,
+          skill_type: firstSkill.skill_type,
+          status: firstSkill.status,
+          updated_at: firstSkill.updated_at,
+        }),
+      );
+    }
+  }, [offlineDemo, selectedSkillId, skills]);
 
   useEffect(() => {
     if (offlineDemo || task.task_id === "demo-task") {
@@ -264,6 +754,7 @@ export default function App() {
 
   const selectedNode = displayNodes.find((node) => node.id === selectedNodeId) ?? null;
   const isReasoningView = activeItem === "reasoning";
+  const isSkillsView = activeItem === "skills";
   const pageTitle =
     activeItem === "reasoning"
       ? "Reasoning"
@@ -283,6 +774,17 @@ export default function App() {
     setActiveReasoningModal(modal);
   }
 
+  function handleOpenCreateGraph() {
+    setActiveItem("reasoning");
+    setSelectedNodeId(null);
+    setSelectedNodeDetail(null);
+    openReasoningModal("compose");
+  }
+
+  function handleRemoveUploadedFile(index: number) {
+    setUploadedFiles((current) => current.filter((_, currentIndex) => currentIndex !== index));
+  }
+
   async function refreshTaskGraph(taskId: string, preserveNodeId: string | null = selectedNodeId) {
     const nextTask = await fetchTask(taskId);
     syncTaskState(nextTask);
@@ -298,10 +800,22 @@ export default function App() {
   async function handleSubmit() {
     setIsSubmitting(true);
     try {
-      const nextTask = await executeTask(prompt, uploadedFiles, determinismMode, controlLevel, autoApproveHumanReview);
+      const sourceUrls = parseSourceUrls(sourceUrlsText);
+      const nextTask = await executeTask(
+        prompt,
+        uploadedFiles,
+        sourceUrls,
+        determinismMode,
+        controlLevel,
+        autoApproveHumanReview,
+      );
       syncTaskState(nextTask);
+      setActiveItem("reasoning");
+      setActiveReasoningModal(null);
       setSelectedNodeId(null);
       setSelectedNodeDetail(null);
+      setUploadedFiles([]);
+      setSourceUrlsText("");
       setOfflineDemo(false);
       setWorkspaceNotice({
         tone: "info",
@@ -434,6 +948,32 @@ export default function App() {
     }
   }
 
+  async function handleDeleteTask(taskId: string) {
+    if (offlineDemo || taskId === task.task_id) {
+      return;
+    }
+    if (!window.confirm(`Delete run ${taskId}? This cannot be undone.`)) {
+      return;
+    }
+    setDeletingTaskId(taskId);
+    try {
+      await deleteTask(taskId);
+      const latestHistory = await fetchTasks().catch(() => history.filter((item) => item.task_id !== taskId));
+      setHistory(latestHistory);
+      setWorkspaceNotice({
+        tone: "info",
+        message: `Deleted run ${taskId}.`,
+      });
+    } catch (error) {
+      setWorkspaceNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+    } finally {
+      setDeletingTaskId(null);
+    }
+  }
+
   async function handleReplayTask() {
     if (offlineDemo || task.task_id === "demo-task") {
       return;
@@ -480,36 +1020,12 @@ export default function App() {
     }
   }
 
-  async function handlePlanNodeChange(nodeId: string, requestText: string) {
-    if (offlineDemo) {
-      return;
-    }
-    setIsPlanningChange(true);
-    try {
-      const nextPlan = await planNodeChange(task.task_id, nodeId, requestText, "dashboard-user");
-      setPlannedChange(nextPlan);
-      setWorkspaceNotice({
-        tone: nextPlan.status === "needs_clarification" ? "error" : "info",
-        message:
-          nextPlan.status === "needs_clarification"
-            ? nextPlan.clarification_question ?? "The node change needs more detail before it can be proposed."
-            : `Prepared a node-scoped change proposal for ${nodeId}.`,
-      });
-    } catch (error) {
-      setWorkspaceNotice({
-        tone: "error",
-        message: formatError(error),
-      });
-    } finally {
-      setIsPlanningChange(false);
-    }
-  }
-
   async function handleChangeNodeExecutor(
     nodeId: string,
     payload: {
       executor_type: string;
       executor_profile?: string | null;
+      skill_artifact_id?: string | null;
       max_child_agents?: number;
       max_recursion_depth?: number;
       child_token_budget?: number;
@@ -542,6 +1058,353 @@ export default function App() {
     }
   }
 
+  async function handleApplyGraphPatch(
+    request: GraphPatchRequest,
+    focusNodeId: string | null = null,
+  ) {
+    if (offlineDemo) {
+      try {
+        const nextTask = applyOfflineGraphPatch(task, request);
+        syncTaskState(nextTask);
+        setSelectedNodeDetail(null);
+        if (focusNodeId && nextTask.nodes.some((node) => node.id === focusNodeId)) {
+          setSelectedNodeId(focusNodeId);
+        }
+        setWorkspaceNotice({
+          tone: "info",
+          message: `${request.patch_type.replace(/_/g, " ")} applied locally in offline mode.`,
+        });
+        return;
+      } catch (error) {
+        setWorkspaceNotice({
+          tone: "error",
+          message: formatError(error),
+        });
+        throw error;
+      }
+    }
+    setIsSubmitting(true);
+    try {
+      const nextTask = await applyGraphPatch(task.task_id, request);
+      await refreshTaskGraph(nextTask.task_id, focusNodeId ?? selectedNodeId);
+      const latestHistory = await fetchTasks().catch(() => history);
+      setHistory(latestHistory);
+      setWorkspaceNotice({
+        tone: "info",
+        message: `${request.patch_type.replace(/_/g, " ")} applied to ${nextTask.task_id}.`,
+      });
+    } catch (error) {
+      setWorkspaceNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+      throw error;
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handlePassAndVerifyNode(nodeId: string) {
+    if (offlineDemo) {
+      return;
+    }
+    setIsPassingNode(true);
+    try {
+      const nextTask = await passAndVerifyNode(task.task_id, nodeId, "dashboard-user");
+      await refreshTaskGraph(nextTask.task_id, nodeId);
+      const latestHistory = await fetchTasks().catch(() => history);
+      setHistory(latestHistory);
+      setWorkspaceNotice({
+        tone: "info",
+        message: `Pass and verify recorded for ${nodeId}.`,
+      });
+    } catch (error) {
+      setWorkspaceNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+    } finally {
+      setIsPassingNode(false);
+    }
+  }
+
+  async function handleSaveAsTemplate() {
+    if (offlineDemo) {
+      setWorkspaceNotice({
+        tone: "error",
+        message: "Template saving is unavailable while the UI is using offline demo data.",
+      });
+      return;
+    }
+
+    const defaultName = `${task.program_id.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase())} Template`;
+    const name = window.prompt("Template name", defaultName)?.trim();
+    if (!name) {
+      return;
+    }
+
+    const description =
+      window.prompt("Template description", `Saved from task ${task.task_id}.`)?.trim() ||
+      `Saved from task ${task.task_id}.`;
+    const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+    const artifactId = `${slugifyTemplateId(name)}_${stamp}`.slice(0, 120);
+
+    setIsSavingTemplate(true);
+    try {
+      await saveTemplateArtifact({
+        artifact_id: artifactId,
+        version: task.program_version,
+        name,
+        description,
+        payload: {
+          template_id: artifactId,
+          name,
+          description,
+          program_id: task.program_id,
+          program_version: task.program_version,
+          keywords: inferTemplateKeywords(task),
+          reasoning_program: buildTemplatePayload(task),
+          source_task_id: task.task_id,
+          determinism_mode: task.determinism_mode ?? "best_effort_deterministic",
+          control_level: task.control_level ?? "operational",
+        },
+      });
+      const availableTemplates = await fetchTemplates().catch(() => templates);
+      setTemplates(availableTemplates);
+      setWorkspaceNotice({
+        tone: "info",
+        message: `Saved ${name} as template ${artifactId}.`,
+      });
+    } catch (error) {
+      setWorkspaceNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+    } finally {
+      setIsSavingTemplate(false);
+    }
+  }
+
+  async function handleSelectSkill(nextSkillId: string) {
+    setSelectedSkillId(nextSkillId);
+    setSkillTestResult(null);
+    setSkillNotice(null);
+    if (offlineDemo) {
+      const mockSkill = mockSkills.find((skill) => skill.skill_id === nextSkillId);
+      setSkillDraft(createBlankSkillDraft(mockSkill ?? {}));
+      return;
+    }
+    setIsLoadingSkills(true);
+    try {
+      const skill = await fetchSkill(nextSkillId);
+      setSkillDraft(createBlankSkillDraft(skill));
+    } catch (error) {
+      setSkillNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+    } finally {
+      setIsLoadingSkills(false);
+    }
+  }
+
+  function handleCreateSkillDraft() {
+    setSelectedSkillId(null);
+    setSkillTestResult(null);
+    setSkillNotice(null);
+    setSkillDraft(createBlankSkillDraft());
+  }
+
+  async function handleGenerateSkillDraft(promptText: string, language: string, skillType: string) {
+    if (!promptText.trim()) {
+      return;
+    }
+    setIsGeneratingSkill(true);
+    try {
+      if (offlineDemo) {
+        const generated = createBlankSkillDraft({
+          skill_id: slugifySkillId(skillDraft.name || "generated_skill"),
+          name: skillDraft.name || "Generated Skill",
+          description: promptText,
+          language,
+          skill_type: skillType,
+          entrypoint_filename: defaultEntrypointFilename(language),
+          code:
+            language === "javascript"
+              ? "const fs = require('fs');\nconst raw = fs.readFileSync(0, 'utf8') || '{}';\nconst payload = JSON.parse(raw);\nconsole.log(JSON.stringify({ ok: true, payload }));\n"
+              : "import json\nimport sys\n\nraw = sys.stdin.read() or '{}'\npayload = json.loads(raw)\nprint(json.dumps({'ok': True, 'payload': payload}))\n",
+          notes: ["Offline demo generated a scaffold. Use a live backend session to synthesize a tailored skill."],
+        });
+        setSkillDraft(generated);
+        setSkillNotice({
+          tone: "info",
+          message: "Generated an offline scaffold skill draft.",
+        });
+        return;
+      }
+      const generated = await generateSkill({
+        prompt: promptText,
+        language,
+        skill_type: skillType,
+        existing_code: skillDraft.code,
+      });
+      setSelectedSkillId(generated.skill_id);
+      setSkillDraft(createBlankSkillDraft(generated));
+      setSkillNotice({
+        tone: "info",
+        message: `Generated a draft for ${generated.name}.`,
+      });
+    } catch (error) {
+      setSkillNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+    } finally {
+      setIsGeneratingSkill(false);
+    }
+  }
+
+  async function handleTestSkillDraft() {
+    if (!skillDraft.code.trim()) {
+      return;
+    }
+    setIsTestingSkill(true);
+    try {
+      const result = await testSkill({
+        language: skillDraft.language,
+        entrypoint_filename: skillDraft.entrypoint_filename,
+        code: skillDraft.code,
+        test_input: skillDraft.test_input,
+      });
+      setSkillTestResult(result);
+      setSkillNotice({
+        tone: result.passed ? "info" : "error",
+        message: result.passed ? "Skill test passed." : "Skill test failed. Review stdout and stderr below.",
+      });
+    } catch (error) {
+      setSkillNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+      setSkillTestResult(null);
+    } finally {
+      setIsTestingSkill(false);
+    }
+  }
+
+  async function handleSaveSkillDraft() {
+    if (!skillDraft.code.trim()) {
+      return;
+    }
+    setIsSavingSkill(true);
+    try {
+      const persisted = await saveSkill({
+        skill_id: skillDraft.skill_id || slugifySkillId(skillDraft.name),
+        version: skillDraft.version || "0.1.0",
+        name: skillDraft.name || "Generated Skill",
+        description: skillDraft.description,
+        language: skillDraft.language,
+        skill_type: skillDraft.skill_type,
+        entrypoint_filename: skillDraft.entrypoint_filename,
+        code: skillDraft.code,
+        test_input: skillDraft.test_input,
+      });
+      const latestSkills = await fetchSkills().catch(() => skills);
+      setSkills(latestSkills);
+      setSelectedSkillId(persisted.skill_id);
+      setSkillDraft(createBlankSkillDraft(persisted));
+      setSkillNotice({
+        tone: "info",
+        message: `Saved skill ${persisted.skill_id}.`,
+      });
+    } catch (error) {
+      setSkillNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+    } finally {
+      setIsSavingSkill(false);
+    }
+  }
+
+  async function handleSendNodeChat(nodeId: string, message: string) {
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage) {
+      return;
+    }
+    const node = task.nodes.find((entry) => entry.id === nodeId);
+    if (!node) {
+      return;
+    }
+    const relevantNodeDetail =
+      selectedNodeDetail && selectedNodeDetail.node.id === nodeId && selectedNodeDetail.task_id === task.task_id
+        ? selectedNodeDetail
+        : null;
+    const key = nodeChatKey(task.task_id, nodeId);
+    const priorHistory = nodeChatThreads[key] ?? [];
+    const nextHistory = [...priorHistory, { role: "user", content: trimmedMessage } satisfies NodeChatMessage];
+    setNodeChatThreads((current) => ({
+      ...current,
+      [key]: nextHistory,
+    }));
+    setIsSendingNodeChat(true);
+    const minimumResponseDelayMs = 2200 + Math.round(Math.random() * 500);
+    const responseStartedAt = Date.now();
+    try {
+      if (offlineDemo) {
+        const reply = buildDemoCopilotReply(node, task, relevantNodeDetail, trimmedMessage);
+        const remainingDelay = minimumResponseDelayMs - (Date.now() - responseStartedAt);
+        if (remainingDelay > 0) {
+          await sleep(remainingDelay);
+        }
+        setNodeChatThreads((current) => ({
+          ...current,
+          [key]: [...nextHistory, { role: "assistant", content: reply }],
+        }));
+        setNodeChatResults((current) => ({
+          ...current,
+          [key]: {
+            task_id: task.task_id,
+            node_id: nodeId,
+            reply,
+            tool_results: [],
+            suggested_actions: [
+              "Why was this node created?",
+              "What evidence supports this node?",
+              `What happens after ${node.title}?`,
+            ],
+            model_metadata: { provider: "offline_demo" },
+          },
+        }));
+        return;
+      }
+      const response = await chatWithNode(task.task_id, nodeId, trimmedMessage, priorHistory);
+      const remainingDelay = minimumResponseDelayMs - (Date.now() - responseStartedAt);
+      if (remainingDelay > 0) {
+        await sleep(remainingDelay);
+      }
+      setNodeChatThreads((current) => ({
+        ...current,
+        [key]: [...nextHistory, { role: "assistant", content: response.reply }],
+      }));
+      setNodeChatResults((current) => ({
+        ...current,
+        [key]: response,
+      }));
+    } catch (error) {
+      setWorkspaceNotice({
+        tone: "error",
+        message: formatError(error),
+      });
+      setNodeChatThreads((current) => ({
+        ...current,
+        [key]: [...nextHistory.slice(0, -1)],
+      }));
+    } finally {
+      setIsSendingNodeChat(false);
+    }
+  }
+
   return (
     <div data-theme={theme} className="h-screen overflow-hidden bg-[var(--mw-page)] text-[var(--mw-text)]">
       <div className="flex h-full">
@@ -553,7 +1416,7 @@ export default function App() {
         />
 
         <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--mw-page)]">
-          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.05),_transparent_38%),radial-gradient(circle_at_bottom,_rgba(184,154,106,0.06),_transparent_30%)]" />
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(86,168,255,0.10),_transparent_38%),radial-gradient(circle_at_bottom,_rgba(219,112,91,0.08),_transparent_30%)]" />
           <HeaderBar
             pageTitle={pageTitle}
             pageEyebrow={pageEyebrow}
@@ -584,6 +1447,14 @@ export default function App() {
                   >
                     Run Workbench
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveAsTemplate()}
+                    disabled={isSavingTemplate || offlineDemo}
+                    className="flex h-11 items-center rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-4 text-sm text-[var(--mw-text)] transition hover:border-[var(--mw-accent)] disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    {isSavingTemplate ? "Saving..." : "Save As Template"}
+                  </button>
                 </>
               ) : null
             }
@@ -610,28 +1481,33 @@ export default function App() {
                 }}
                 sidePanel={
                   <>
-                    <ChangePlannerPanel
-                      offlineDemo={offlineDemo}
-                      selectedNodeId={null}
-                      selectedNodeTitle={null}
-                      planResult={plannedChange}
-                      isPlanning={isPlanningChange}
-                      isApplying={isApplyingPlannedChange}
-                      onPlanChange={handlePlanChange}
-                      onApplyPlannedChange={handleApplyPlannedChange}
-                    />
+                    {!selectedNode ? (
+                      <ChangePlannerPanel
+                        offlineDemo={offlineDemo}
+                        selectedNodeId={null}
+                        selectedNodeTitle={null}
+                        planResult={plannedChange}
+                        isPlanning={isPlanningChange}
+                        isApplying={isApplyingPlannedChange}
+                        onPlanChange={handlePlanChange}
+                        onApplyPlannedChange={handleApplyPlannedChange}
+                      />
+                    ) : null}
                     {selectedNode ? (
                       <InspectorDrawer
                         node={selectedNode}
                         nodeDetail={selectedNodeDetail}
-                        planResult={plannedChange}
                         isLoading={isLoadingNodeDetail}
-                        isPlanning={isPlanningChange}
-                        isApplying={isApplyingPlannedChange}
                         isUpdatingExecutor={isSubmitting}
-                        onPlanNodeChange={handlePlanNodeChange}
-                        onApplyPlannedChange={handleApplyPlannedChange}
+                        isPassing={isPassingNode}
+                        isChatting={isSendingNodeChat}
+                        chatMessages={nodeChatThreads[nodeChatKey(task.task_id, selectedNode.id)] ?? []}
+                        chatResponse={nodeChatResults[nodeChatKey(task.task_id, selectedNode.id)] ?? null}
+                        availableSkills={skills}
                         onChangeExecutor={handleChangeNodeExecutor}
+                        onPassAndVerifyNode={handlePassAndVerifyNode}
+                        onSendChat={handleSendNodeChat}
+                        onOpenSkillsWorkspace={() => setActiveItem("skills")}
                         onClose={() => {
                           setSelectedNodeId(null);
                           setSelectedNodeDetail(null);
@@ -647,10 +1523,14 @@ export default function App() {
                     nodes={displayNodes}
                     edges={task.edges}
                     selectedNodeId={selectedNodeId}
+                    canEditGraph
+                    isApplyingPatch={isSubmitting}
+                    onApplyGraphPatch={handleApplyGraphPatch}
                     onSelectNode={(node) => {
                       setSelectedNodeId(node.id);
                       setSelectedNodeDetail(null);
                     }}
+                    onPassNode={(node) => void handlePassAndVerifyNode(node.id)}
                   />
                 </div>
               </ReasoningWorkspace>
@@ -663,8 +1543,11 @@ export default function App() {
                 <PromptComposer
                   prompt={prompt}
                   onPromptChange={setPrompt}
+                  sourceUrls={sourceUrlsText}
+                  onSourceUrlsChange={setSourceUrlsText}
                   onSubmit={handleSubmit}
                   onFileSelect={setUploadedFiles}
+                  onRemoveFile={handleRemoveUploadedFile}
                   determinismMode={determinismMode}
                   onDeterminismModeChange={setDeterminismMode}
                   controlLevel={controlLevel}
@@ -739,26 +1622,60 @@ export default function App() {
                   </div>
                 </div>
               ) : null}
-              <OperationsView
-                activeItem={activeItem}
-                task={task}
-                history={history}
-                templates={templates}
-                offlineDemo={offlineDemo}
-                isLoadingTask={isLoadingTask}
-                isLoadingTemplates={isLoadingTemplates}
-                isReplayingTask={isReplayingTask}
-                notice={workspaceNotice}
-                determinismMode={determinismMode}
-                controlLevel={controlLevel}
-                autoApproveHumanReview={autoApproveHumanReview}
-                onDeterminismModeChange={setDeterminismMode}
-                onControlLevelChange={setControlLevel}
-                onAutoApproveHumanReviewChange={setAutoApproveHumanReview}
-                onSelectTask={handleSelectTask}
-                onReplayTask={handleReplayTask}
-                onNavigateReasoning={() => setActiveItem("reasoning")}
-              />
+              {isSkillsView ? (
+                <SkillsStudio
+                  skills={skills}
+                  draft={skillDraft}
+                  selectedSkillId={selectedSkillId}
+                  isLoadingSkills={isLoadingSkills}
+                  isGenerating={isGeneratingSkill}
+                  isTesting={isTestingSkill}
+                  isSaving={isSavingSkill}
+                  testResult={skillTestResult}
+                  notice={skillNotice}
+                  onSelectSkill={handleSelectSkill}
+                  onCreateDraft={handleCreateSkillDraft}
+                  onDraftChange={(patch) =>
+                    setSkillDraft((current) =>
+                      createBlankSkillDraft({
+                        ...current,
+                        ...patch,
+                        entrypoint_filename:
+                          patch.language && current.entrypoint_filename === defaultEntrypointFilename(current.language)
+                            ? defaultEntrypointFilename(patch.language)
+                            : patch.entrypoint_filename ?? current.entrypoint_filename,
+                      }),
+                    )
+                  }
+                  onGenerate={handleGenerateSkillDraft}
+                  onTest={handleTestSkillDraft}
+                  onSave={handleSaveSkillDraft}
+                />
+              ) : (
+                <OperationsView
+                  activeItem={activeItem}
+                  task={task}
+                  history={history}
+                  templates={templates}
+                  offlineDemo={offlineDemo}
+                  isLoadingTask={isLoadingTask}
+                  isLoadingTemplates={isLoadingTemplates}
+                  isReplayingTask={isReplayingTask}
+                  notice={workspaceNotice}
+                  determinismMode={determinismMode}
+                  controlLevel={controlLevel}
+                  autoApproveHumanReview={autoApproveHumanReview}
+                  onDeterminismModeChange={setDeterminismMode}
+                  onControlLevelChange={setControlLevel}
+                  onAutoApproveHumanReviewChange={setAutoApproveHumanReview}
+                  onSelectTask={handleSelectTask}
+                  onReplayTask={handleReplayTask}
+                  onCreateGraph={handleOpenCreateGraph}
+                  onDeleteTask={handleDeleteTask}
+                  deletingTaskId={deletingTaskId}
+                  onNavigateReasoning={() => setActiveItem("reasoning")}
+                />
+              )}
             </div>
           )}
         </main>
@@ -799,9 +1716,7 @@ function ReasoningWorkspace({
             role="dialog"
             aria-modal="true"
             aria-label="Run summary"
-            className="relative z-10 h-[80vh] w-[min(80vw,960px)]"
-            onClick={(event) => event.stopPropagation()}
-          >
+            className="relative z-10 flex h-[80vh] w-[min(80vw,1440px)] min-w-[min(960px,96vw)] flex-col overflow-hidden rounded-[28px] border border-[var(--mw-border)] bg-[var(--mw-page)] shadow-[0_40px_120px_rgba(0,0,0,0.40)]"          >
             <SummaryCard {...summaryProps} />
           </div>
         </div>
@@ -850,7 +1765,7 @@ function OverlayModal({ open, title, onClose, children }: OverlayModalProps) {
         <div className="flex items-center justify-between border-b border-[var(--mw-border)] px-5 py-4">
           <div>
             <div className="text-[10px] uppercase tracking-[0.24em] text-[var(--mw-subtle)]">Reasoning Workspace</div>
-            <div className="mt-1 font-serif text-[28px] leading-none text-[var(--mw-text)]">{title}</div>
+            <div className="mt-1 font-sans text-[28px] font-semibold leading-none text-[var(--mw-text)]">{title}</div>
           </div>
           <button
             type="button"
@@ -887,7 +1802,7 @@ export function PanelResizeHandle({ width, onWidthChange }: PanelResizeHandlePro
 
     function handlePointerMove(moveEvent: PointerEvent) {
       const delta = startX - moveEvent.clientX;
-      onWidthChange(Math.min(520, Math.max(300, startWidth + delta)));
+      onWidthChange(Math.min(550, Math.max(300, startWidth + delta)));
     }
 
     function handlePointerUp(upEvent: PointerEvent) {

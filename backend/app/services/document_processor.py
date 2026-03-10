@@ -5,7 +5,9 @@ import hashlib
 import io
 import re
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
+import httpx
 from docx import Document as DocxDocument
 from fastapi import UploadFile
 from openpyxl import load_workbook
@@ -32,7 +34,23 @@ class DocumentProcessor:
             raw = await file.read()
             filename = file.filename or "document.bin"
             media_type = file.content_type or "application/octet-stream"
-            documents.append(self._persist_file(task_id, filename, media_type, raw))
+            documents.append(self._persist_file(task_id, filename, media_type, raw, ingest_source="upload"))
+        return documents
+
+    async def store_links(self, task_id: str, urls: list[str]) -> list[DocumentRecord]:
+        documents: list[DocumentRecord] = []
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            for index, raw_url in enumerate(urls):
+                url = raw_url.strip()
+                if not url:
+                    continue
+                response = await client.get(url, headers={"User-Agent": "MindWeave/1.0"})
+                response.raise_for_status()
+                media_type = str(response.headers.get("content-type") or "text/html").split(";", 1)[0].strip() or "text/html"
+                filename = self._filename_from_url(url, media_type, index)
+                document = self._persist_file(task_id, filename, media_type, response.content, ingest_source="url")
+                document.metadata["source_url"] = url
+                documents.append(document)
         return documents
 
     def load_sample_pack(self, task_id: str, pack_id: str = "invisium_fy2026") -> list[DocumentRecord]:
@@ -46,11 +64,19 @@ class DocumentProcessor:
                         filename=path.name,
                         media_type=self._guess_media_type(path.suffix),
                         raw=path.read_bytes(),
+                        ingest_source="sample",
                     )
                 )
         return documents
 
-    def _persist_file(self, task_id: str, filename: str, media_type: str, raw: bytes) -> DocumentRecord:
+    def _persist_file(
+        self,
+        task_id: str,
+        filename: str,
+        media_type: str,
+        raw: bytes,
+        ingest_source: str = "upload",
+    ) -> DocumentRecord:
         safe_name = self._sanitize_filename(filename)
         relative_raw_path = f"{task_id}/{safe_name}"
         self.storage_service.storage_root = self.storage_root
@@ -70,6 +96,7 @@ class DocumentProcessor:
             extracted_text=extracted_text,
             metadata={
                 **metadata,
+                "ingest_source": ingest_source,
                 "storage_backend": self.storage_service.backend,
                 "local_storage_path": str(raw_write.local_path),
                 "local_text_path": str(text_write.local_path),
@@ -100,6 +127,13 @@ class DocumentProcessor:
             return self._extract_csv(raw)
         if suffix == ".xlsx":
             return self._extract_xlsx(raw)
+        if suffix in {".html", ".htm"}:
+            decoded = raw.decode("utf-8", errors="ignore")
+            text = re.sub(r"<script[\s\S]*?</script>", " ", decoded, flags=re.IGNORECASE)
+            text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text, {"source_format": "html", "line_count": len(text.splitlines())}
 
         decoded = raw.decode("utf-8", errors="ignore")
         return decoded, {"line_count": len(decoded.splitlines())}
@@ -151,3 +185,21 @@ class DocumentProcessor:
     def _sanitize_filename(filename: str) -> str:
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._")
         return stem or "document"
+
+    @staticmethod
+    def _filename_from_url(url: str, media_type: str, index: int) -> str:
+        parsed = urlparse(url)
+        candidate = unquote(Path(parsed.path).name or "")
+        if not candidate:
+            host = re.sub(r"[^A-Za-z0-9._-]+", "_", parsed.netloc or f"source_{index + 1}")
+            candidate = f"{host}.html" if media_type == "text/html" else host
+        suffix = Path(candidate).suffix.lower()
+        if suffix:
+            return candidate
+        if media_type == "application/pdf":
+            return f"{candidate}.pdf"
+        if media_type == "text/html":
+            return f"{candidate}.html"
+        if media_type.startswith("text/"):
+            return f"{candidate}.txt"
+        return candidate

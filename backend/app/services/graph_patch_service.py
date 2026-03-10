@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
-from app.models.artifacts import BudgetSpec
+from app.models.artifacts import AgentSpec, BudgetSpec
 from app.models.runtime import (
     ExecutorType,
     GraphEdge,
@@ -17,6 +17,44 @@ from app.models.runtime import (
 
 
 class GraphPatchService:
+    @staticmethod
+    def _coerce_agent_spec(value: Any) -> AgentSpec | None:
+        if value is None:
+            return None
+        if isinstance(value, AgentSpec):
+            return value
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(mode="json")
+        if isinstance(value, dict) and value:
+            return AgentSpec.model_validate(value)
+        return None
+
+    @staticmethod
+    def _derive_agent_spec(
+        *,
+        title: str,
+        instruction: str,
+        executor_type: Any,
+        executor_profile: str | None,
+        metadata: dict[str, Any],
+        existing: AgentSpec | None = None,
+    ) -> AgentSpec | None:
+        if existing is not None:
+            payload = existing.model_dump(mode="json")
+        else:
+            tool_spec = metadata.get("tool") if isinstance(metadata.get("tool"), dict) else None
+            context = {
+                "executor_type": getattr(executor_type, "value", str(executor_type)),
+                "executor_profile": executor_profile,
+            }
+            payload = {
+                "persona": executor_profile or title,
+                "instruction": instruction,
+                "context": {key: value for key, value in context.items() if value},
+                "tools": [tool_spec] if tool_spec is not None else [],
+            }
+        return AgentSpec.model_validate(payload) if any(payload.values()) else None
+
     def apply(
         self,
         state: GraphReasoningState,
@@ -49,6 +87,8 @@ class GraphPatchService:
             self._change_executor(state, target_node_id, patch_payload)
         elif normalized_type == "expand_node":
             self._expand_node(state, target_node_id, patch_payload)
+        elif normalized_type == "insert_node_between":
+            self._insert_node_between(state, patch_payload)
         else:
             raise ValueError(f"Unsupported patch type: {patch_type}")
 
@@ -71,14 +111,38 @@ class GraphPatchService:
         raw_node = payload.get("node", payload)
         if not isinstance(raw_node, dict):
             raise ValueError("add_node requires a node payload.")
+        placement = str(payload.get("placement") or "").strip()
+        reference_node_id = str(payload.get("reference_node_id") or target_node_id or "").strip()
         node_id = str(raw_node.get("id") or f"patched_node_{len(state.nodes) + 1}")
         if node_id in state.nodes:
             raise ValueError(f"Node {node_id} already exists.")
 
         depends_on = [str(value) for value in raw_node.get("depends_on", []) if str(value).strip()]
-        if target_node_id and not depends_on:
-            depends_on = [target_node_id]
         next_nodes = [str(value) for value in raw_node.get("next_nodes", raw_node.get("next", [])) if str(value).strip()]
+        reference_node = state.nodes.get(reference_node_id) if reference_node_id else None
+        reference_next_nodes = list(reference_node.next_nodes) if reference_node is not None else []
+
+        if placement == "before_node":
+            if reference_node is None:
+                raise ValueError("add_node with before_node placement requires a valid reference_node_id.")
+            depends_on = list(reference_node.depends_on)
+            next_nodes = [reference_node_id]
+            self._apply_layout_hint(raw_node, reference_node, placement)
+        elif placement == "after_node":
+            if reference_node is None:
+                raise ValueError("add_node with after_node placement requires a valid reference_node_id.")
+            depends_on = [reference_node_id]
+            next_nodes = list(reference_next_nodes)
+            self._apply_layout_hint(raw_node, reference_node, placement)
+        elif placement == "branch_from":
+            if reference_node is None:
+                raise ValueError("add_node with branch_from placement requires a valid reference_node_id.")
+            depends_on = [reference_node_id]
+            next_nodes = list(reference_next_nodes)
+            self._apply_layout_hint(raw_node, reference_node, placement)
+        elif target_node_id and not depends_on:
+            depends_on = [target_node_id]
+
         node = GraphNodeState(
             id=node_id,
             title=str(raw_node.get("title") or node_id.replace("_", " ").title()),
@@ -92,6 +156,7 @@ class GraphPatchService:
             priority=int(raw_node.get("priority", max((node.priority for node in state.nodes.values()), default=0) + 5)),
             executor_type=raw_node.get("executor_type", "llm_operator"),
             executor_profile=raw_node.get("executor_profile"),
+            agent_spec=self._coerce_agent_spec(raw_node.get("agent_spec")),
             max_child_agents=int(raw_node.get("max_child_agents", 0) or 0),
             max_recursion_depth=int(raw_node.get("max_recursion_depth", 0) or 0),
             child_token_budget=int(raw_node.get("child_token_budget", 0) or 0),
@@ -103,6 +168,14 @@ class GraphPatchService:
             next_nodes=next_nodes,
             metadata=raw_node.get("metadata", {}) if isinstance(raw_node.get("metadata"), dict) else {},
             evidence_scope=raw_node.get("evidence_scope", {}) if isinstance(raw_node.get("evidence_scope"), dict) else {},
+        )
+        node.agent_spec = self._derive_agent_spec(
+            title=node.title,
+            instruction=node.instruction,
+            executor_type=node.executor_type,
+            executor_profile=node.executor_profile,
+            metadata=node.metadata,
+            existing=node.agent_spec,
         )
         state.nodes[node_id] = node
 
@@ -117,6 +190,37 @@ class GraphPatchService:
             if next_node_id in state.nodes and node_id not in state.nodes[next_node_id].depends_on:
                 state.nodes[next_node_id].depends_on.append(node_id)
             self._append_edge_if_missing(state, GraphEdge(source=node_id, target=next_node_id))
+
+        if placement == "before_node" and reference_node is not None:
+            for dependency_id in depends_on:
+                if dependency_id in state.nodes:
+                    state.nodes[dependency_id].next_nodes = list(
+                        dict.fromkeys(
+                            node_id if value == reference_node_id else value
+                            for value in state.nodes[dependency_id].next_nodes
+                        )
+                    )
+                    self._remove_edge(state, dependency_id, reference_node_id)
+                    self._append_edge_if_missing(state, GraphEdge(source=dependency_id, target=node_id))
+            reference_node.depends_on = [value for value in reference_node.depends_on if value not in depends_on]
+            if node_id not in reference_node.depends_on:
+                reference_node.depends_on.insert(0, node_id)
+
+        if placement == "after_node" and reference_node is not None:
+            reference_node.next_nodes = [value for value in reference_node.next_nodes if value not in reference_next_nodes]
+            if node_id not in reference_node.next_nodes:
+                reference_node.next_nodes.append(node_id)
+            for next_node_id in reference_next_nodes:
+                self._remove_edge(state, reference_node_id, next_node_id)
+                if next_node_id in state.nodes:
+                    state.nodes[next_node_id].depends_on = list(
+                        dict.fromkeys(
+                            node_id if value == reference_node_id else value
+                            for value in state.nodes[next_node_id].depends_on
+                        )
+                    )
+                    if node_id not in state.nodes[next_node_id].depends_on:
+                        state.nodes[next_node_id].depends_on.append(node_id)
 
     def _remove_node(self, state: GraphReasoningState, target_node_id: str | None) -> None:
         if not target_node_id or target_node_id not in state.nodes:
@@ -142,6 +246,52 @@ class GraphPatchService:
             for edge in state.evidence_graph_edges
             if edge.source not in removable_graph_nodes and edge.target not in removable_graph_nodes
         ]
+
+    def _insert_node_between(self, state: GraphReasoningState, payload: dict[str, Any]) -> None:
+        raw_node = payload.get("node")
+        source_node_id = str(payload.get("source_node_id") or "").strip()
+        target_node_id = str(payload.get("target_node_id") or "").strip()
+        if not isinstance(raw_node, dict):
+            raise ValueError("insert_node_between requires a node payload.")
+        if not source_node_id or source_node_id not in state.nodes:
+            raise ValueError("insert_node_between requires a valid source_node_id.")
+        if not target_node_id or target_node_id not in state.nodes:
+            raise ValueError("insert_node_between requires a valid target_node_id.")
+        if target_node_id not in state.nodes[source_node_id].next_nodes:
+            raise ValueError("insert_node_between requires an existing edge between the source and target nodes.")
+
+        self._apply_layout_hint(raw_node, state.nodes[source_node_id], "between_nodes")
+        self._add_node(
+            state,
+            target_node_id=None,
+            payload={
+                "node": {
+                    **raw_node,
+                    "depends_on": [source_node_id],
+                    "next_nodes": [target_node_id],
+                }
+            },
+        )
+
+        inserted_node_id = str(raw_node.get("id") or "")
+        if not inserted_node_id or inserted_node_id not in state.nodes:
+            raise ValueError("insert_node_between could not create the requested node.")
+
+        state.nodes[source_node_id].next_nodes = list(
+            dict.fromkeys(
+                inserted_node_id if value == target_node_id else value
+                for value in state.nodes[source_node_id].next_nodes
+            )
+        )
+        state.nodes[target_node_id].depends_on = list(
+            dict.fromkeys(
+                inserted_node_id if value == source_node_id else value
+                for value in state.nodes[target_node_id].depends_on
+            )
+        )
+        self._remove_edge(state, source_node_id, target_node_id)
+        self._append_edge_if_missing(state, GraphEdge(source=source_node_id, target=inserted_node_id))
+        self._append_edge_if_missing(state, GraphEdge(source=inserted_node_id, target=target_node_id))
 
     def _rewire_dependency(self, state: GraphReasoningState, target_node_id: str | None, payload: dict[str, Any]) -> None:
         if not target_node_id or target_node_id not in state.nodes:
@@ -177,6 +327,7 @@ class GraphPatchService:
             node.evidence_refs = []
             node.finding_records = []
             node.thought_summary = ""
+            node.reasoning_trace = None
             node.inputs = {}
             node.output = {}
             node.model_metadata = {}
@@ -253,11 +404,19 @@ class GraphPatchService:
         if node.executor_type == ExecutorType.agent_operator and node.child_token_budget == 0:
             node.child_token_budget = int(payload.get("child_token_budget", 4000) or 4000)
         node.delegated_summary_required = bool(payload.get("delegated_summary_required", node.delegated_summary_required))
+        explicit_agent_spec = self._coerce_agent_spec(payload.get("agent_spec"))
+        node.agent_spec = self._derive_agent_spec(
+            title=node.title,
+            instruction=node.instruction,
+            executor_type=node.executor_type,
+            executor_profile=node.executor_profile,
+            metadata=node.metadata,
+            existing=explicit_agent_spec or node.agent_spec,
+        )
         if bool(payload.get("expand_subgraph")) or "expand_subgraph" in node.expansion_contracts:
             self._materialize_expanded_children(state, node, payload)
 
-    @staticmethod
-    def _change_executor(state: GraphReasoningState, target_node_id: str | None, payload: dict[str, Any]) -> None:
+    def _change_executor(self, state: GraphReasoningState, target_node_id: str | None, payload: dict[str, Any]) -> None:
         if not target_node_id or target_node_id not in state.nodes:
             raise ValueError("change_executor requires an existing target_node_id.")
         node = state.nodes[target_node_id]
@@ -275,9 +434,23 @@ class GraphPatchService:
         node.executor_profile = str(payload.get("executor_profile") or node.executor_profile or "") or None
         if node.executor_profile:
             node.metadata["executor_profile"] = node.executor_profile
+        skill_artifact_id = str(payload.get("skill_artifact_id") or "").strip()
+        if skill_artifact_id:
+            node.metadata["skill_artifact_id"] = skill_artifact_id
+        else:
+            node.metadata.pop("skill_artifact_id", None)
         note = str(payload.get("instruction_note") or "").strip()
         if note:
             node.instruction = f"{node.instruction}\n{note}".strip()
+        explicit_agent_spec = self._coerce_agent_spec(payload.get("agent_spec"))
+        node.agent_spec = self._derive_agent_spec(
+            title=node.title,
+            instruction=node.instruction,
+            executor_type=node.executor_type,
+            executor_profile=node.executor_profile,
+            metadata=node.metadata,
+            existing=explicit_agent_spec or node.agent_spec,
+        )
 
     @staticmethod
     def _subtree_nodes(state: GraphReasoningState, root_id: str) -> set[str]:
@@ -318,6 +491,7 @@ class GraphPatchService:
                 "priority": node.priority,
                 "executor_type": getattr(node.executor_type, "value", str(node.executor_type)),
                 "executor_profile": node.executor_profile,
+                "agent_spec": node.agent_spec.model_dump(mode="json") if node.agent_spec is not None else None,
                 "max_child_agents": node.max_child_agents,
                 "max_recursion_depth": node.max_recursion_depth,
                 "child_token_budget": node.child_token_budget,
@@ -342,6 +516,55 @@ class GraphPatchService:
         ):
             return
         state.edges.append(candidate)
+
+    @staticmethod
+    def _remove_edge(state: GraphReasoningState, source_id: str, target_id: str) -> None:
+        state.edges = [
+            edge
+            for edge in state.edges
+            if not (edge.source == source_id and edge.target == target_id)
+        ]
+
+    @staticmethod
+    def _apply_layout_hint(
+        raw_node: dict[str, Any],
+        reference_node: GraphNodeState,
+        placement: str,
+        *,
+        sibling_index: int = 0,
+        sibling_count: int = 1,
+    ) -> None:
+        metadata = raw_node.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        existing_layout = metadata.get("layout")
+        if not isinstance(existing_layout, dict):
+            existing_layout = {}
+
+        reference_layout = reference_node.metadata.get("layout", {})
+        base_row = int(reference_layout.get("row", 0) or 0) if isinstance(reference_layout, dict) else 0
+        base_column = int(reference_layout.get("column", 1) or 1) if isinstance(reference_layout, dict) else 1
+
+        default_layout: dict[str, Any] = {
+            "column": base_column,
+            "row": max(base_row + 1, 0),
+            "placement": placement,
+            "reference_node_id": reference_node.id,
+        }
+        if placement == "before_node":
+            default_layout["row"] = max(base_row - 1, 0)
+        elif placement == "branch_from":
+            default_layout["column"] = base_column + 1
+        elif placement == "expanded_child":
+            default_layout["parent_node_id"] = reference_node.id
+            default_layout["sibling_index"] = sibling_index
+            default_layout["sibling_count"] = sibling_count
+
+        metadata["layout"] = {
+            **default_layout,
+            **existing_layout,
+        }
+        raw_node["metadata"] = metadata
 
     def _materialize_expanded_children(
         self,
@@ -380,6 +603,13 @@ class GraphPatchService:
                         "expansion_contracts": list(node.expansion_contracts),
                     },
                     spawned_from=node.id,
+                )
+                self._apply_layout_hint(
+                    child_node.metadata,
+                    node,
+                    "expanded_child",
+                    sibling_index=index,
+                    sibling_count=child_count,
                 )
                 state.nodes[child_id] = child_node
             if child_id not in node.next_nodes:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
@@ -10,11 +12,15 @@ from app.models.api import (
     ArtifactPayloadResponse,
     ArtifactPromotionResponse,
     ArtifactSummary,
+    DeleteTaskResponse,
     GraphPatchRequest,
     ExperimentRunRequest,
     ExperimentRunResponse,
     NodeDetailResponse,
+    NodeChatRequest,
+    NodeChatResponse,
     NodeExecutorChangeRequest,
+    NodePassVerifyRequest,
     NodePlanChangeRequest,
     OptimizationRunRequest,
     OptimizationRunResponse,
@@ -27,6 +33,12 @@ from app.models.api import (
     RunDiffResponse,
     ReviewDecisionRequest,
     ReviewDecisionResponse,
+    SkillArtifactResponse,
+    SkillGenerateRequest,
+    SkillSaveRequest,
+    SkillSummary,
+    SkillTestRequest,
+    SkillTestResponse,
     TaskRunListItem,
     TaskRunResponse,
     TemplateSummary,
@@ -46,6 +58,19 @@ from app.services.task_service import TaskService
 
 
 router = APIRouter()
+
+
+def _parse_source_urls(value: str) -> list[str]:
+    raw = value.strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return [item.strip() for item in raw.replace(",", "\n").splitlines() if item.strip()]
 
 
 @router.get("/health")
@@ -226,10 +251,36 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> TaskRunResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.delete("/tasks/{task_id}", response_model=DeleteTaskResponse)
+def delete_task(task_id: str, db: Session = Depends(get_db)) -> DeleteTaskResponse:
+    try:
+        return TaskService(db).delete_task(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/tasks/{task_id}/nodes/{node_id}", response_model=NodeDetailResponse)
 def get_node_detail(task_id: str, node_id: str, db: Session = Depends(get_db)) -> NodeDetailResponse:
     try:
         return TaskService(db).get_node_detail(task_id, node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/nodes/{node_id}/chat", response_model=NodeChatResponse)
+def chat_with_node(
+    task_id: str,
+    node_id: str,
+    request: NodeChatRequest,
+    db: Session = Depends(get_db),
+) -> NodeChatResponse:
+    try:
+        return TaskService(db).chat_with_node(
+            task_id=task_id,
+            node_id=node_id,
+            message=request.message,
+            history=[message.model_dump() for message in request.history],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -284,6 +335,7 @@ async def execute_task(
     control_level: ControlLevel = Form(default=ControlLevel.operational),
     auto_approve_human_review: bool = Form(True),
     use_sample_data: bool = Form(True),
+    source_urls: str = Form(default=""),
     files: list[UploadFile] = File(default=[]),
     db: Session = Depends(get_db),
 ) -> TaskRunResponse:
@@ -294,6 +346,7 @@ async def execute_task(
         auto_approve_human_review=auto_approve_human_review,
         use_sample_data=use_sample_data,
         files=files,
+        source_urls=_parse_source_urls(source_urls),
         determinism_mode=determinism_mode,
         control_level=control_level,
     )
@@ -403,6 +456,7 @@ def change_node_executor(
             node_id=node_id,
             executor_type=request.executor_type,
             executor_profile=request.executor_profile,
+            skill_artifact_id=request.skill_artifact_id,
             max_child_agents=request.max_child_agents,
             max_recursion_depth=request.max_recursion_depth,
             child_token_budget=request.child_token_budget,
@@ -412,6 +466,74 @@ def change_node_executor(
             change_reason=request.change_reason,
             instruction_note=request.instruction_note,
             auto_rerun=request.auto_rerun,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/skills", response_model=list[SkillSummary])
+def list_skills(db: Session = Depends(get_db)) -> list[SkillSummary]:
+    return TaskService(db).list_skills()
+
+
+@router.get("/skills/{skill_id}", response_model=SkillArtifactResponse)
+def get_skill(skill_id: str, version: str | None = None, db: Session = Depends(get_db)) -> SkillArtifactResponse:
+    try:
+        return TaskService(db).get_skill(skill_id, version=version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/skills/generate", response_model=SkillArtifactResponse)
+def generate_skill(request: SkillGenerateRequest, db: Session = Depends(get_db)) -> SkillArtifactResponse:
+    return TaskService(db).generate_skill(
+        prompt=request.prompt,
+        language=request.language,
+        skill_type=request.skill_type,
+        existing_code=request.existing_code,
+    )
+
+
+@router.post("/skills", response_model=SkillArtifactResponse)
+def save_skill(request: SkillSaveRequest, db: Session = Depends(get_db)) -> SkillArtifactResponse:
+    return TaskService(db).save_skill(
+        skill_id=request.skill_id,
+        version=request.version,
+        name=request.name,
+        description=request.description,
+        language=request.language,
+        skill_type=request.skill_type,
+        entrypoint_filename=request.entrypoint_filename,
+        code=request.code,
+        test_input=request.test_input,
+    )
+
+
+@router.post("/skills/test", response_model=SkillTestResponse)
+def test_skill(request: SkillTestRequest, db: Session = Depends(get_db)) -> SkillTestResponse:
+    return TaskService(db).test_skill(
+        language=request.language,
+        entrypoint_filename=request.entrypoint_filename,
+        code=request.code,
+        test_input=request.test_input,
+        args=request.args,
+    )
+
+
+@router.post("/tasks/{task_id}/nodes/{node_id}/pass-verify", response_model=TaskRunResponse)
+def pass_and_verify_node(
+    task_id: str,
+    node_id: str,
+    request: NodePassVerifyRequest,
+    db: Session = Depends(get_db),
+) -> TaskRunResponse:
+    try:
+        return TaskService(db).pass_and_verify_node(
+            task_id=task_id,
+            node_id=node_id,
+            reviewer=request.reviewer,
+            comments=request.comments,
+            resume_execution=request.resume_execution,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

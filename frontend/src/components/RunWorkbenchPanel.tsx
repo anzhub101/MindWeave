@@ -95,13 +95,14 @@ export function RunWorkbenchPanel({
   const traceAccessHistory = task.trace_access_history ?? [];
   const evidenceGraphEdges = task.evidence_graph_edges ?? [];
   const evidenceGraphNodeCount = Object.keys(task.evidence_graph_nodes ?? {}).length;
+  const plannerTrace = task.planner_trace;
 
   return (
     <section className="rounded-[22px] border border-[var(--mw-border)] bg-[var(--mw-panel)] p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-[10px] uppercase tracking-[0.24em] text-[var(--mw-subtle)]">Run Workbench</div>
-          <div className="mt-2 font-serif text-[24px] leading-none text-[var(--mw-text)]">Runtime Controls</div>
+          <div className="mt-2 font-sans text-[24px] font-semibold leading-none text-[var(--mw-text)]">Runtime Controls</div>
         </div>
         <div className="rounded-full border border-[var(--mw-border)] px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-[var(--mw-accent)]">
           {liveTask ? humanize(task.status) : "No Active Run"}
@@ -194,6 +195,109 @@ export function RunWorkbenchPanel({
 
       <div className="mt-4 rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
         <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.22em] text-[var(--mw-subtle)]">Graph Creation Trace</div>
+            <div className="mt-1 text-[13px] leading-6 text-[var(--mw-muted)]">
+              Structured planner trace for why this reasoning graph was created.
+            </div>
+          </div>
+          <div className="rounded-full border border-[var(--mw-border)] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-[var(--mw-accent)]">
+            {plannerTrace?.web_fallback_used ? "Web Fallback Used" : "No Web Fallback"}
+          </div>
+        </div>
+
+        {plannerTrace ? (
+          <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_1fr]">
+            <div className="space-y-3">
+              <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--mw-subtle)]">Summary</div>
+                <div className="mt-2 text-[14px] leading-7 text-[var(--mw-text)]">{plannerTrace.summary}</div>
+                <div className="mt-2 text-[13px] leading-6 text-[var(--mw-muted)]">{plannerTrace.graph_shape_reason}</div>
+                <div className="mt-2 font-mono text-[11px] text-[var(--mw-subtle)]">
+                  Confidence {typeof plannerTrace.confidence === "number" ? plannerTrace.confidence.toFixed(2) : "--"}
+                </div>
+              </div>
+
+              <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--mw-subtle)]">Evidence Sources Available</div>
+                <div className="mt-2 max-h-[180px] space-y-2 overflow-y-auto">
+                  {plannerTrace.evidence_sources_available.map((source) => (
+                    <div key={source.source_id} className="rounded-[12px] border border-[var(--mw-border)] bg-[var(--mw-node)] px-3 py-2 text-[12px] leading-6 text-[var(--mw-muted)]">
+                      <span className="text-[var(--mw-text)]">{source.label}</span>
+                      <br />
+                      {humanize(source.source_type)}
+                      {source.url ? (
+                        <>
+                          {" · "}
+                          <a
+                            href={source.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[var(--mw-accent)] underline underline-offset-2"
+                          >
+                            Open source
+                          </a>
+                        </>
+                      ) : null}
+                      <br />
+                      {source.detail}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--mw-subtle)]">Candidate Operations Considered</div>
+                <div className="mt-2 max-h-[180px] space-y-2 overflow-y-auto">
+                  {plannerTrace.candidate_graph_operations.map((operation, index) => (
+                    <div key={`${operation.operation}-${index}`} className="rounded-[12px] border border-[var(--mw-border)] bg-[var(--mw-node)] px-3 py-2 text-[12px] leading-6 text-[var(--mw-muted)]">
+                      <span className="text-[var(--mw-text)]">{humanize(operation.operation)}</span> · {humanize(operation.disposition)}
+                      <br />
+                      {operation.rationale}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--mw-subtle)]">Node Decisions</div>
+                <div className="mt-2 max-h-[180px] space-y-2 overflow-y-auto">
+                  {plannerTrace.node_decisions.map((decision) => (
+                    <div key={decision.node_id} className="rounded-[12px] border border-[var(--mw-border)] bg-[var(--mw-node)] px-3 py-2 text-[12px] leading-6 text-[var(--mw-muted)]">
+                      <span className="text-[var(--mw-text)]">{humanize(decision.node_id)}</span> · {humanize(decision.action)}
+                      <br />
+                      {decision.reason}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-4 py-3">
+                <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--mw-subtle)]">Unresolved Gaps</div>
+                <div className="mt-2 text-[12px] leading-6 text-[var(--mw-muted)]">
+                  {plannerTrace.unresolved_gaps.length
+                    ? plannerTrace.unresolved_gaps.join(" | ")
+                    : "No unresolved planning gaps were recorded."}
+                </div>
+                {plannerTrace.web_search_queries.length ? (
+                  <div className="mt-3 font-mono text-[11px] text-[var(--mw-subtle)]">
+                    Queries: {plannerTrace.web_search_queries.join(" ; ")}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-[13px] leading-6 text-[var(--mw-muted)]">
+            No planner trace is stored for the current task.
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4">
+        <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-[var(--mw-accent)]">
             <Telescope size={14} />
             <div className="text-[11px] uppercase tracking-[0.22em]">Reasoning Trace</div>
@@ -240,7 +344,7 @@ export function RunWorkbenchPanel({
             trace.entries.map((entry) => (
               <div key={entry.node_id} className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="font-serif text-[16px] text-[var(--mw-text)]">{entry.title}</div>
+                  <div className="font-sans text-[16px] font-semibold text-[var(--mw-text)]">{entry.title}</div>
                   <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--mw-subtle)]">{humanize(entry.status)}</div>
                 </div>
                 <div className="mt-1 text-[13px] leading-6 text-[var(--mw-muted)]">{entry.conclusion}</div>
@@ -308,19 +412,19 @@ export function RunWorkbenchPanel({
               <div className="grid gap-2 sm:grid-cols-4">
                 <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-2 text-[12px] text-[var(--mw-muted)]">
                   Nodes<br />
-                  <span className="font-serif text-[22px] text-[var(--mw-text)]">{diff.changed_nodes.length}</span>
+                  <span className="font-sans text-[22px] font-semibold text-[var(--mw-text)]">{diff.changed_nodes.length}</span>
                 </div>
                 <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-2 text-[12px] text-[var(--mw-muted)]">
                   Prompts<br />
-                  <span className="font-serif text-[22px] text-[var(--mw-text)]">{diff.changed_prompts.length}</span>
+                  <span className="font-sans text-[22px] font-semibold text-[var(--mw-text)]">{diff.changed_prompts.length}</span>
                 </div>
                 <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-2 text-[12px] text-[var(--mw-muted)]">
                   Evidence<br />
-                  <span className="font-serif text-[22px] text-[var(--mw-text)]">{diff.changed_evidence.length}</span>
+                  <span className="font-sans text-[22px] font-semibold text-[var(--mw-text)]">{diff.changed_evidence.length}</span>
                 </div>
                 <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-2 text-[12px] text-[var(--mw-muted)]">
                   Final Output<br />
-                  <span className="font-serif text-[22px] text-[var(--mw-text)]">
+                  <span className="font-sans text-[22px] font-semibold text-[var(--mw-text)]">
                     {diff.changed_final_output.changed ? "Yes" : "No"}
                   </span>
                 </div>
@@ -329,7 +433,7 @@ export function RunWorkbenchPanel({
                 {diff.changed_nodes.length ? (
                   diff.changed_nodes.map((entry) => (
                     <div key={entry.node_id} className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-2 text-[13px] leading-6 text-[var(--mw-muted)]">
-                      <div className="font-serif text-[15px] text-[var(--mw-text)]">{humanize(entry.node_id)}</div>
+                      <div className="font-sans text-[15px] font-semibold text-[var(--mw-text)]">{humanize(entry.node_id)}</div>
                       <div className="mt-1">Changed: {entry.changed_fields.map(humanize).join(", ")}</div>
                     </div>
                   ))
@@ -480,11 +584,11 @@ export function RunWorkbenchPanel({
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-3 text-[12px] text-[var(--mw-muted)]">
               Evidence Nodes<br />
-              <span className="font-serif text-[24px] text-[var(--mw-text)]">{evidenceGraphNodeCount}</span>
+              <span className="font-sans text-[24px] font-semibold text-[var(--mw-text)]">{evidenceGraphNodeCount}</span>
             </div>
             <div className="rounded-[14px] border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-3 text-[12px] text-[var(--mw-muted)]">
               Evidence Edges<br />
-              <span className="font-serif text-[24px] text-[var(--mw-text)]">{evidenceGraphEdges.length}</span>
+              <span className="font-sans text-[24px] font-semibold text-[var(--mw-text)]">{evidenceGraphEdges.length}</span>
             </div>
           </div>
           <div className="mt-3 max-h-[150px] space-y-2 overflow-y-auto">

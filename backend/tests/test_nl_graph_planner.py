@@ -14,6 +14,7 @@ from app.models.runtime import (
     GraphReasoningState,
     ReasoningVisibilityTier,
 )
+from app.services.llm_gateway import MockProvider
 from app.services.task_service import TaskService
 
 
@@ -22,6 +23,10 @@ def _session_factory(tmp_path):
     engine = create_engine(database_url, connect_args={"check_same_thread": False}, future=True)
     Base.metadata.create_all(bind=engine)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+def _use_mock_llm(service: TaskService) -> None:
+    service.llm_gateway.provider = MockProvider()
 
 
 def _ambiguous_state() -> GraphReasoningState:
@@ -68,6 +73,7 @@ def test_plan_change_builds_valid_executor_proposal_and_audit_history(tmp_path) 
     SessionLocal = _session_factory(tmp_path)
     with SessionLocal() as db:
         service = TaskService(db)
+        _use_mock_llm(service)
         run = asyncio.run(
             service.execute_task(
                 prompt="Perform a financial audit for Invisium FY2026",
@@ -119,6 +125,7 @@ def test_apply_planned_change_requires_approval_for_strict_audit(tmp_path) -> No
     SessionLocal = _session_factory(tmp_path)
     with SessionLocal() as db:
         service = TaskService(db)
+        _use_mock_llm(service)
         run = asyncio.run(
             service.execute_task(
                 prompt="Perform a financial audit for Invisium FY2026",
@@ -148,7 +155,8 @@ def test_apply_planned_change_requires_approval_for_strict_audit(tmp_path) -> No
             auto_rerun=False,
         )
 
-        analysis_node = next(node for node in applied.nodes if node.id == "analysis")
+        patched_target_id = planned.proposal.patches[0].target_node_id
+        analysis_node = next(node for node in applied.nodes if node.id == patched_target_id)
         assert analysis_node.evidence_scope is not None
         assert analysis_node.evidence_scope.get("instruction_note")
 
@@ -157,6 +165,7 @@ def test_apply_planned_change_can_insert_new_node(tmp_path) -> None:
     SessionLocal = _session_factory(tmp_path)
     with SessionLocal() as db:
         service = TaskService(db)
+        _use_mock_llm(service)
         run = asyncio.run(
             service.execute_task(
                 prompt="Perform a financial audit for Invisium FY2026",

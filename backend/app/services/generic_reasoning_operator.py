@@ -10,6 +10,7 @@ from app.models.runtime import (
     EvidenceSupportLevel,
     ExecutorType,
     FindingRecord,
+    GraphDelta,
     GraphNodeState,
     GraphReasoningState,
     NodeExecutionResult,
@@ -36,9 +37,15 @@ class GenericReasoningOperator:
         self.documents = knowledge_base.documents
 
     def execute(self, state: GraphReasoningState, node: GraphNodeState) -> NodeExecutionResult:
+        agent_spec = node.agent_spec
+        effective_instruction = (
+            agent_spec.instruction.strip()
+            if agent_spec is not None and isinstance(agent_spec.instruction, str) and agent_spec.instruction.strip()
+            else node.instruction
+        )
         evidence_scope = node.evidence_scope or node.metadata.get("evidence_scope", {})
         evidence_chunks = self.knowledge_base.retrieve(
-            f"{state.prompt}\n{node.title}\n{node.subtitle}\n{node.instruction}",
+            f"{state.prompt}\n{node.title}\n{node.subtitle}\n{effective_instruction}",
             top_k=4,
             evidence_scope=evidence_scope,
         )
@@ -55,24 +62,51 @@ class GenericReasoningOperator:
             else {}
         )
         tool_calls: list[dict[str, Any]] = []
-        tool_spec = node.metadata.get("tool")
+        skill_artifact_id = str(node.metadata.get("skill_artifact_id") or "").strip()
+        agent_tools = (
+            [tool.model_dump(mode="json") for tool in agent_spec.tools]
+            if agent_spec is not None
+            else []
+        )
+        tool_spec = (
+            {
+                "name": "skill",
+                "args": {
+                    "skill_artifact_id": skill_artifact_id,
+                    "input_payload": {
+                        "task_prompt": state.prompt,
+                        "node_id": node.id,
+                        "node_title": node.title,
+                        "node_instruction": effective_instruction,
+                        "inputs": node.inputs,
+                        "evidence_refs": [reference.model_dump(mode="json") for reference in list(available_evidence.values())[:4]],
+                    },
+                },
+            }
+            if skill_artifact_id
+            else node.metadata.get("tool") if isinstance(node.metadata.get("tool"), dict) else agent_tools[0] if agent_tools else None
+        )
         tool_result = None
+        web_fallback_used = False
 
         if isinstance(tool_spec, dict):
             tool_result = self.tool_runtime.execute(tool_spec, state, node, self.knowledge_base)
             tool_calls.append(tool_result)
             if node.metadata.get("tool_only") or node.executor_type == ExecutorType.tool_operator:
                 evidence_refs = list(available_evidence.values())[:3]
+                tool_name = str(tool_result.get("tool", node.subtitle))
                 return NodeExecutionResult(
                     output={"tool_result": tool_result},
                     evidence_refs=evidence_refs,
                     verification_status=VerificationStatus.skipped,
-                    thought_summary=str(tool_result.get("tool", node.subtitle)),
+                    thought_summary=tool_name,
+                    reasoning_trace=f"Executed the {tool_name} tool path to anchor evidence and prepare structured inputs for this node.",
                     llm_usage_tokens=0,
                     model_metadata={
                         "provider": "tool_runtime",
                         "executor_type": node.executor_type.value,
                         "executor_profile": node.executor_profile,
+                        "agent_spec": agent_spec.model_dump(mode="json") if agent_spec is not None else None,
                     },
                     finding_records=self._default_finding_records(node, evidence_refs),
                     final_output=self._build_fallback_final_output(state, node, {"tool_result": tool_result}, evidence_refs)
@@ -84,29 +118,57 @@ class GenericReasoningOperator:
                     tool_calls=tool_calls,
                 )
 
+        if self._should_use_web_fallback(evidence_chunks):
+            web_result = self.tool_runtime.execute(
+                {
+                    "name": "web_search",
+                    "args": {
+                        "query": f"{state.prompt} {node.title} {node.subtitle}".strip(),
+                        "top_k": 4,
+                    },
+                },
+                state,
+                node,
+                self.knowledge_base,
+            )
+            tool_calls.append(web_result)
+            web_refs = self._web_results_to_evidence_refs(web_result.get("results", []))
+            if web_refs:
+                web_fallback_used = True
+                available_evidence.update({reference.id: reference for reference in web_refs})
+                evidence_context.extend(self._web_context(reference) for reference in web_refs)
+                available_evidence_ids = list(available_evidence.keys())
+
         prompt = (
             "Execute the current reasoning node and return JSON only.\n"
             "Use only provided evidence identifiers.\n"
             "Ground every substantive claim in the supplied evidence.\n"
             "If a finding is inferred or unsupported, label it explicitly.\n"
+            "When dependency outputs contain thought summaries, reasoning traces, or finding records, use them as prior branch context.\n"
+            "For aggregate or merge nodes, reconcile substantive dependency findings instead of returning null placeholders when upstream branches contain content.\n"
+            'Include a "reasoning" field containing the model rationale used to produce the node output.\n'
+            'If the node needs to mutate the downstream runtime graph, include a "graph_delta" object with a summary and patch operations.\n'
         )
         system_prompt = (
             "You are the MindWeave runtime executor. "
             "Produce structured node outputs for a reasoning graph. "
             "Never bypass verification gates or fabricate evidence references."
         )
+        if agent_spec is not None and agent_spec.persona.strip():
+            system_prompt = f"{system_prompt} Operate as {agent_spec.persona.strip()}."
         context = {
             "user_prompt": state.prompt,
             "domain": state.domain,
             "program_id": state.program_id,
-            "node_count": len(state.nodes),
             "node_id": node.id,
             "node_title": node.title,
             "node_subtitle": node.subtitle,
             "operation_type": node.operation_type,
-            "node_instruction": node.instruction,
+            "node_instruction": effective_instruction,
             "success_criteria": node.success_criteria,
             "executor_type": node.executor_type.value,
+            "executor_profile": node.executor_profile,
+            "agent_spec": agent_spec.model_dump(mode="json") if agent_spec is not None else None,
             "expansion_contracts": node.expansion_contracts,
             "max_child_agents": node.max_child_agents,
             "max_recursion_depth": node.max_recursion_depth,
@@ -121,6 +183,7 @@ class GenericReasoningOperator:
             "available_evidence_ids": available_evidence_ids,
             "available_document_ids": sorted({reference.document_id for reference in available_evidence.values()}),
             "retrieved_evidence": evidence_context,
+            "web_fallback_used": web_fallback_used,
             "tool_result": tool_result,
             "evidence_scope": evidence_scope,
             "control_level": state.control_level.value,
@@ -129,23 +192,42 @@ class GenericReasoningOperator:
             "delegation_policy": state.delegation_policy.model_dump(mode="json"),
         }
         max_tokens = 3200 if is_final_node else 2000
+        if agent_spec is not None and agent_spec.model is not None and isinstance(agent_spec.model.max_tokens, int) and agent_spec.model.max_tokens > 0:
+            max_tokens = agent_spec.model.max_tokens
         delegated_token_budget = int(node.metadata.get("delegated_token_budget", 0) or 0)
         if delegated_token_budget > 0:
             max_tokens = min(max_tokens, max(256, delegated_token_budget))
+        requested_model_id = (
+            agent_spec.model.model_id
+            if agent_spec is not None and agent_spec.model is not None and agent_spec.model.model_id
+            else state.model_id or None
+        )
+        requested_model_version = (
+            agent_spec.model.model_version
+            if agent_spec is not None and agent_spec.model is not None and agent_spec.model.model_version
+            else state.model_version or None
+        )
+        requested_temperature = (
+            0.0
+            if state.deterministic
+            else agent_spec.model.temperature
+            if agent_spec is not None and agent_spec.model is not None and agent_spec.model.temperature is not None
+            else self.settings.k2_temperature
+        )
         response = self.llm_gateway.generate(
             LLMRequest(
                 task="node_execution",
                 prompt=prompt,
                 system_prompt=system_prompt,
                 context=context,
-                temperature=0.0 if state.deterministic else self.settings.k2_temperature,
+                temperature=requested_temperature,
                 top_p=1.0 if state.determinism_mode.value != "non_deterministic" else self.settings.k2_top_p,
                 seed=(state.program_blueprint or {}).get("deterministic_defaults", {}).get("seed")
                 if state.program_blueprint
                 else None,
                 determinism_mode=state.determinism_mode.value,
-                model_id=state.model_id or None,
-                model_version=state.model_version or None,
+                model_id=requested_model_id,
+                model_version=requested_model_version,
                 agentic=True,
                 max_tokens=max_tokens,
             )
@@ -169,6 +251,7 @@ class GenericReasoningOperator:
         )
 
         payload = self._load_payload(response.content)
+        reasoning_trace = payload.pop("reasoning", payload.pop("reasoning_trace", None))
         evidence_refs = self._normalize_evidence_refs(payload.get("evidence_ids", []), available_evidence)
         verification_status = self._normalize_verification_status(payload.get("verification_status"))
         if node.operation_type == "verify" and verification_status == VerificationStatus.skipped:
@@ -192,11 +275,14 @@ class GenericReasoningOperator:
             final_output = self._build_fallback_final_output(state, node, output if isinstance(output, dict) else {}, evidence_refs)
         if is_final_node and isinstance(final_output, dict) and "finding_records" not in final_output:
             final_output["finding_records"] = [record.model_dump(mode="json") for record in finding_records]
+        if is_final_node and isinstance(final_output, dict):
+            final_output = self._ensure_required_final_output_fields(final_output, state.output_schema_definition)
 
         final_summary = payload.get("final_summary")
         if is_final_node and final_summary is None:
             final_summary = self._build_fallback_summary(state, node, final_output or output)
 
+        graph_delta = self._parse_graph_delta(payload.get("graph_delta"), node)
         spawned_nodes = self._parse_spawned_nodes(state, payload.get("spawned_nodes"), node)
 
         return NodeExecutionResult(
@@ -205,6 +291,7 @@ class GenericReasoningOperator:
             verification_status=verification_status,
             verification_checks=verification_checks if isinstance(verification_checks, list) else [],
             thought_summary=str(payload.get("summary", node.subtitle)),
+            reasoning_trace=str(reasoning_trace).strip() if isinstance(reasoning_trace, str) and reasoning_trace.strip() else None,
             llm_usage_tokens=response.prompt_tokens + response.completion_tokens,
             prompt_trace=prompt_trace,
             model_metadata={
@@ -216,11 +303,14 @@ class GenericReasoningOperator:
                 "request_params": response.request_params,
                 "executor_type": node.executor_type.value,
                 "executor_profile": node.executor_profile,
+                "agent_spec": agent_spec.model_dump(mode="json") if agent_spec is not None else None,
                 "prompt_hash": prompt_trace.prompt_hash,
+                "web_fallback_used": web_fallback_used,
             },
             finding_records=finding_records,
             final_output=final_output if isinstance(final_output, dict) else None,
             final_summary=final_summary if isinstance(final_summary, dict) else None,
+            graph_delta=graph_delta,
             spawned_nodes=spawned_nodes,
             tool_calls=tool_calls,
         )
@@ -290,6 +380,8 @@ class GenericReasoningOperator:
                     evaluation_ids=[str(value) for value in item.get("evaluation_ids", [])],
                     priority=int(item.get("priority", parent.priority + 5)),
                     executor_type=item.get("executor_type") or ExecutorType.llm_operator,
+                    executor_profile=item.get("executor_profile"),
+                    agent_spec=item.get("agent_spec") if isinstance(item.get("agent_spec"), dict) else None,
                     max_child_agents=int(item.get("max_child_agents", 0)),
                     max_recursion_depth=int(item.get("max_recursion_depth", 0)),
                     child_token_budget=0,
@@ -312,15 +404,63 @@ class GenericReasoningOperator:
         return spawned
 
     @staticmethod
+    def _parse_graph_delta(payload: Any, parent: GraphNodeState) -> GraphDelta | None:
+        if payload is None:
+            return None
+        if hasattr(payload, "model_dump"):
+            payload = payload.model_dump(mode="json")
+        if isinstance(payload, list):
+            payload = {"operations": payload}
+        if not isinstance(payload, dict):
+            return None
+
+        operations = payload.get("operations", payload.get("patches"))
+        if not isinstance(operations, list):
+            return None
+
+        normalized_operations: list[dict[str, Any]] = []
+        for item in operations:
+            if not isinstance(item, dict):
+                continue
+            patch_type = str(item.get("patch_type") or "").strip()
+            if not patch_type:
+                continue
+            normalized_operations.append(
+                {
+                    "patch_type": patch_type,
+                    "target_node_id": str(item.get("target_node_id")).strip() if item.get("target_node_id") else None,
+                    "change_reason": str(item.get("change_reason") or f"Runtime graph delta requested by {parent.id}.").strip(),
+                    "payload": item.get("payload", {}) if isinstance(item.get("payload"), dict) else {},
+                    "auto_rerun": bool(item.get("auto_rerun", False)),
+                }
+            )
+
+        if not normalized_operations:
+            return None
+
+        return GraphDelta.model_validate(
+            {
+                "delta_id": payload.get("delta_id"),
+                "source_node_id": str(payload.get("source_node_id") or parent.id),
+                "summary": str(payload.get("summary") or f"Runtime graph delta proposed by {parent.id}.").strip(),
+                "operations": normalized_operations,
+            }
+        )
+
+    @staticmethod
     def _extract_structured_output(payload: dict[str, Any], raw_content: str) -> dict[str, Any]:
         reserved = {
             "summary",
+            "reasoning",
+            "reasoning_trace",
             "evidence_ids",
             "verification_status",
             "verification_checks",
             "final_output",
             "final_summary",
             "finding_records",
+            "graph_delta",
+            "spawned_nodes",
         }
         structured = {
             key: value
@@ -347,6 +487,21 @@ class GenericReasoningOperator:
         }
 
     @staticmethod
+    def _web_context(reference: EvidenceReference) -> dict[str, Any]:
+        return {
+            "document_id": reference.document_id,
+            "document_name": reference.document_name,
+            "chunk_id": reference.chunk_id,
+            "page": reference.page,
+            "char_start": reference.char_start,
+            "char_end": reference.char_end,
+            "retrieval_score": reference.retrieval_score,
+            "text": reference.text_excerpt,
+            "url": reference.metadata.get("url"),
+            "source_type": reference.source_type,
+        }
+
+    @staticmethod
     def _chunk_to_evidence_reference(chunk: KnowledgeChunk) -> EvidenceReference:
         return EvidenceReference(
             id=chunk.id,
@@ -362,6 +517,42 @@ class GenericReasoningOperator:
             source_type=chunk.source_type,
             text_excerpt=chunk.text[:280],
         )
+
+    @staticmethod
+    def _web_results_to_evidence_refs(values: Any) -> list[EvidenceReference]:
+        if not isinstance(values, list):
+            return []
+        references: list[EvidenceReference] = []
+        for index, item in enumerate(values):
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            title = str(item.get("title") or url or f"Web result {index + 1}")
+            snippet = str(item.get("snippet") or item.get("description") or "").strip()
+            if not url and not snippet:
+                continue
+            references.append(
+                EvidenceReference(
+                    id=str(item.get("result_id") or item.get("id") or url or f"web_result_{index}"),
+                    document_id=url or f"web_result_{index}",
+                    document_name=title,
+                    chunk_id=str(item.get("result_id") or item.get("id") or f"web_result_{index}"),
+                    retrieval_score=item.get("score") if isinstance(item.get("score"), (int, float)) else None,
+                    support_level=EvidenceSupportLevel.direct,
+                    citation_mode="web_search",
+                    source_type="web_search",
+                    text_excerpt=snippet[:280],
+                    metadata={"url": url, "provider": item.get("provider", "web_search")},
+                )
+            )
+        return references
+
+    def _should_use_web_fallback(self, evidence_chunks: list[KnowledgeChunk]) -> bool:
+        if not self.settings.web_search_enabled:
+            return False
+        if not self.documents:
+            return True
+        return not evidence_chunks
 
     @staticmethod
     def _normalize_evidence_refs(values: Any, available_map: dict[str, EvidenceReference]) -> list[EvidenceReference]:
@@ -550,10 +741,32 @@ class GenericReasoningOperator:
             "finding_records": [record.model_dump(mode="json") for record in finding_records],
             "evidence_sources": [reference.document_id for reference in evidence_refs] or [document.id for document in state.source_documents[:5]],
             "next_steps": [
-                "Review the verification node and linked evidence.",
-                "Confirm the final conclusion before external distribution.",
-            ],
+            "Review the verification node and linked evidence.",
+            "Confirm the final conclusion before external distribution.",
+        ],
         }
+
+    @staticmethod
+    def _ensure_required_final_output_fields(
+        final_output: dict[str, Any],
+        schema_definition: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        schema = schema_definition if isinstance(schema_definition, dict) else {}
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required_fields = schema.get("required") if isinstance(schema.get("required"), list) else []
+        normalized = dict(final_output)
+        for field_name in required_fields:
+            if field_name in normalized:
+                continue
+            field_schema = properties.get(field_name) if isinstance(properties, dict) else {}
+            field_type = field_schema.get("type") if isinstance(field_schema, dict) else None
+            if field_type == "array":
+                normalized[field_name] = []
+            elif field_type == "object":
+                normalized[field_name] = {}
+            else:
+                normalized[field_name] = ""
+        return normalized
 
     @staticmethod
     def _delegation_allowed(state: GraphReasoningState, parent: GraphNodeState) -> bool:

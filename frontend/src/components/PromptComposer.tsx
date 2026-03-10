@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { LoaderCircle, Upload, ChevronDown, ChevronUp } from "lucide-react";
+import { LoaderCircle, Upload, ChevronDown, ChevronUp, X } from "lucide-react";
 
 interface PromptComposerProps {
   prompt: string;
   onPromptChange: (value: string) => void;
+  sourceUrls: string;
+  onSourceUrlsChange: (value: string) => void;
   onSubmit: () => void;
   onFileSelect: (files: File[]) => void;
+  onRemoveFile: (index: number) => void;
   determinismMode: "non_deterministic" | "best_effort_deterministic" | "strict_deterministic";
   onDeterminismModeChange: (value: "non_deterministic" | "best_effort_deterministic" | "strict_deterministic") => void;
   controlLevel: "exploratory" | "operational" | "regulated" | "strict_audit";
@@ -22,8 +25,11 @@ interface PromptComposerProps {
 export function PromptComposer({
   prompt,
   onPromptChange,
+  sourceUrls,
+  onSourceUrlsChange,
   onSubmit,
   onFileSelect,
+  onRemoveFile,
   determinismMode,
   onDeterminismModeChange,
   controlLevel,
@@ -54,7 +60,7 @@ export function PromptComposer({
           <div className="text-[11px] font-medium uppercase tracking-[0.26em] text-[var(--mw-accent)]">
             Compose A Run
           </div>
-          <div className="mt-1 flex items-center gap-2 font-serif text-[22px] leading-none text-[var(--mw-text)]">
+          <div className="mt-1 flex items-center gap-2 font-sans text-[22px] font-semibold leading-none text-[var(--mw-text)]">
             Prompt
             {isExpanded ? (
               <ChevronUp size={16} className="text-[var(--mw-subtle)] transition hover:text-[var(--mw-text)]" />
@@ -86,13 +92,40 @@ export function PromptComposer({
               className="min-h-[82px] w-full resize-none rounded-[16px] border border-[var(--mw-border)] bg-[var(--mw-node)] px-4 py-3 text-[14px] leading-6 text-[var(--mw-text)] outline-none transition focus:border-[var(--mw-border-strong)]"
             />
 
+            <textarea
+              value={sourceUrls}
+              onChange={(event) => onSourceUrlsChange(event.target.value)}
+              placeholder={"Optional source URLs, one per line.\nhttps://example.com/report\nhttps://example.com/filing.pdf"}
+              className="mt-3 min-h-[82px] w-full resize-none rounded-[16px] border border-[var(--mw-border)] bg-[var(--mw-node)] px-4 py-3 font-mono text-[13px] leading-6 text-[var(--mw-text)] outline-none transition focus:border-[var(--mw-border-strong)]"
+            />
+
             <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
               <div className="space-y-3">
                 <div className="text-[13px] text-[var(--mw-subtle)]">
-                  {files.length > 0
-                    ? `${files.length} document${files.length === 1 ? "" : "s"} attached`
-                    : "No uploads attached. The bundled sample pack will be used."}
+                  {files.length > 0 || sourceUrls.trim()
+                    ? `${files.length} upload${files.length === 1 ? "" : "s"} attached${sourceUrls.trim() ? ` · ${sourceUrls.split(/\n+/).filter(Boolean).length} source URL${sourceUrls.split(/\n+/).filter(Boolean).length === 1 ? "" : "s"}` : ""}`
+                    : "No uploads attached. If web fallback is configured, the runtime will anchor to live web evidence."}
                 </div>
+                {files.length ? (
+                  <div className="flex flex-wrap gap-2">
+                    {files.map((file, index) => (
+                      <div
+                        key={`${file.name}-${index}`}
+                        className="inline-flex items-center gap-2 rounded-full border border-[var(--mw-border)] bg-[var(--mw-panel)] px-3 py-2 text-[12px] text-[var(--mw-text)]"
+                      >
+                        <span className="max-w-[16rem] truncate">{file.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveFile(index)}
+                          className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--mw-subtle)] transition hover:bg-[var(--mw-node)] hover:text-[var(--mw-text)]"
+                          aria-label={`Remove ${file.name}`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap gap-3 text-xs text-[var(--mw-muted)]">
                   <label className="flex items-center gap-2 rounded-full border border-[var(--mw-border)] bg-[var(--mw-node)] px-3 py-2">
                     <span>Mode</span>
