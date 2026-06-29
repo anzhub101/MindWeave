@@ -66,28 +66,18 @@ interface GraphCanvasProps {
 }
 
 function operationLabel(operationType: string) {
-  if (operationType === "analyze") {
-    return "Analyze";
+  switch (operationType) {
+    case "generate":    return "Generate";
+    case "analyze":     return "Analyze";
+    case "verify":      return "Verify";
+    case "synthesize":  return "Synthesize";
+    case "aggregate":   return "Aggregate";
+    case "calculate":   return "Calculate";
+    case "tool":        return "Tool";
+    case "hitl":
+    case "human_review": return "Authority Gate";
+    default:            return operationType.charAt(0).toUpperCase() + operationType.slice(1);
   }
-  if (operationType === "verify") {
-    return "Verify";
-  }
-  if (operationType === "synthesize") {
-    return "Synthesize";
-  }
-  if (operationType === "aggregate") {
-    return "Aggregate";
-  }
-  if (operationType === "calculate") {
-    return "Calculate";
-  }
-  if (operationType === "tool") {
-    return "Tool";
-  }
-  if (operationType === "hitl") {
-    return "Human Review";
-  }
-  return "Generate";
 }
 
 function humanizeBranch(kind: string) {

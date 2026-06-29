@@ -1768,7 +1768,7 @@ export default function App() {
                   onAutoApproveHumanReviewChange={setAutoApproveHumanReview}
                   files={uploadedFiles}
                   isSubmitting={isSubmitting}
-                  offlineDemo={false}
+                  offlineDemo={offlineDemo}
                   countdownTime={countdownTime}
                   isNodeSelected={false}
                 />
