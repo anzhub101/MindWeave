@@ -70,7 +70,7 @@ from app.services.generic_reasoning_operator import GenericReasoningOperator
 from app.services.graph_patch_service import GraphPatchService
 from app.services.knowledge_base import KnowledgeBase
 from app.services.llm_gateway import LLMGateway
-from app.services.node_cache import NodeCacheService
+from app.services.node_cache import NodeCacheService, build_node_cache_service
 from app.services.node_chat_service import NodeChatService
 from app.services.program_synthesizer import ProgramSynthesisService
 from app.services.review_service import ReviewService
@@ -106,7 +106,7 @@ class TaskService:
         self.artifact_registry = ArtifactRegistryService(db)
         self.skill_service = SkillService(self.artifact_registry, self.llm_gateway)
         self.review_service = ReviewService(db)
-        self.cache_service = NodeCacheService(db)
+        self.cache_service = build_node_cache_service(db, self.settings)
         self.vector_store = VectorStore(db)
         self.schema_service = SchemaService(registry=self.artifact_registry)
         self.evaluation_service = EvaluationService(registry=self.artifact_registry, llm_gateway=self.llm_gateway)

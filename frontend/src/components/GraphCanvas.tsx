@@ -28,6 +28,7 @@ const ROW_GAP = 220;
 const COLUMN_SPACING = 360;
 const HORIZONTAL_PADDING = 180;
 const TOP_OFFSET = 44;
+const FIRST_NODE_VIEW_TOP_MARGIN = 32;
 
 type Point = {
   x: number;
@@ -76,6 +77,15 @@ function operationLabel(operationType: string) {
   }
   if (operationType === "aggregate") {
     return "Aggregate";
+  }
+  if (operationType === "calculate") {
+    return "Calculate";
+  }
+  if (operationType === "tool") {
+    return "Tool";
+  }
+  if (operationType === "hitl") {
+    return "Human Review";
   }
   return "Generate";
 }
@@ -264,6 +274,7 @@ function buildAutoLayout(nodes: GraphNode[], edges: GraphEdge[]): LayoutMetrics 
   }
 
   const positions: Record<string, Point> = {};
+  const visiting = new Set<string>();
   let cursorCenterX = HORIZONTAL_PADDING + CARD_WIDTH / 2;
 
   function orderedChildren(nodeId: string) {
@@ -287,7 +298,11 @@ function buildAutoLayout(nodes: GraphNode[], edges: GraphEdge[]): LayoutMetrics 
     if (positions[nodeId]) {
       return;
     }
+    if (visiting.has(nodeId)) {
+      return;
+    }
 
+    visiting.add(nodeId);
     const childIds = orderedChildren(nodeId);
     for (const childId of childIds) {
       placeNode(childId);
@@ -310,6 +325,7 @@ function buildAutoLayout(nodes: GraphNode[], edges: GraphEdge[]): LayoutMetrics 
       x: centerX - CARD_WIDTH / 2,
       y: TOP_OFFSET + (depth.get(nodeId) ?? 0) * ROW_GAP,
     };
+    visiting.delete(nodeId);
   }
 
   const roots = nodes
@@ -403,6 +419,7 @@ export function GraphCanvas({
     moved: false,
   });
   const nodeMap = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const firstNodeId = nodes[0]?.id ?? null;
   const layoutSignature = useMemo(() => buildLayoutSignature(nodes, edges), [nodes, edges]);
   const autoLayout = useMemo(() => buildAutoLayout(nodes, edges), [layoutSignature]);
 
@@ -435,24 +452,26 @@ export function GraphCanvas({
       }
 
       const { clientWidth, clientHeight } = canvasRef.current;
-      const graphWidth = innerWidth * currentZoom;
-      const graphHeight = innerHeight * currentZoom;
 
-      // If the graph is wider than the screen, anchor to 0 (uses HORIZONTAL_PADDING)
-      // Otherwise, center it perfectly.
-      const targetX = graphWidth > clientWidth 
-        ? 0 
-        : (clientWidth - graphWidth) / 2;
+      let targetX = 0;
+      let targetY = 32;
 
-      // If the graph is taller than the screen, anchor near the top
-      // Otherwise, center it vertically.
-      const targetY = graphHeight > clientHeight
-          ? 32 
-          : (clientHeight - graphHeight) / 2;
+      if (firstNodeId) {
+        const firstNodePos = autoLayout.positions[firstNodeId] ?? { x: HORIZONTAL_PADDING, y: TOP_OFFSET };
+
+        targetX = clientWidth / 2 - (firstNodePos.x + CARD_WIDTH / 2) * currentZoom;
+        targetY = FIRST_NODE_VIEW_TOP_MARGIN - firstNodePos.y * currentZoom;
+      } else {
+        const graphWidth = innerWidth * currentZoom;
+        const graphHeight = innerHeight * currentZoom;
+
+        targetX = graphWidth > clientWidth ? 0 : (clientWidth - graphWidth) / 2;
+        targetY = graphHeight > clientHeight ? 32 : (clientHeight - graphHeight) / 2;
+      }
 
       setPan({ x: targetX, y: targetY });
     },
-    [innerHeight, innerWidth],
+    [autoLayout.positions, firstNodeId, innerHeight, innerWidth],
   );
 
   useEffect(() => {
@@ -494,11 +513,11 @@ export function GraphCanvas({
   }
 
   function applyZoom(nextZoom: number) {
-    setZoom(clamp(Number(nextZoom.toFixed(2)), 0.4, 2.2));
+    setZoom(clamp(Number(nextZoom.toFixed(2)), 0.2, 2.2));
   }
 
   function zoomAroundPoint(nextZoom: number, viewportX: number, viewportY: number) {
-    const clamped = clamp(Number(nextZoom.toFixed(2)), 0.4, 2.2);
+    const clamped = clamp(Number(nextZoom.toFixed(2)), 0.2, 2.2);
     const ratio = clamped / zoom;
     setPan({
       x: viewportX - (viewportX - pan.x) * ratio,

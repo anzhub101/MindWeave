@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "deal_brief_schema_v1",
+  "title": "Deal Brief",
+  "description": "Schema-validated output for the SPA Contract-to-Cash deal brief synthesis node.",
+  "type": "object",
+  "required": ["recommendation", "findings", "payment_validation", "kyc_flags", "suggested_redlines"],
+  "properties": {
+    "recommendation": {
+      "type": "string",
+      "description": "Overall recommendation: APPROVE, HOLD, or REJECT, with one-sentence rationale.",
+      "examples": ["HOLD — do not execute. Critical deviations on escrow, jurisdiction, and statutory warranty require SEVC sign-off."]
+    },
+    "authority_routing": {
+      "type": "string",
+      "description": "Which approval tier is required per the HOD→FC→SEVC matrix and why.",
+      "examples": ["SEVC + Legal + Compliance — deviations touch escrow, governing law, and statutory warranties."]
+    },
+    "findings": {
+      "type": "array",
+      "description": "Severity-ranked list of all findings from clause deviation, payment validation, KYC/AML, and compliance checks.",
+      "items": {
+        "type": "object",
+        "required": ["id", "area", "severity", "description", "citation"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Finding identifier, e.g. D1, P2, K3.",
+            "examples": ["D1", "P1", "K2"]
+          },
+          "area": {
+            "type": "string",
+            "enum": ["clause_deviation", "payment_validation", "kyc_aml", "compliance"],
+            "description": "Which verification domain surfaced this finding."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"],
+            "description": "Severity level of the finding."
+          },
+          "description": {
+            "type": "string",
+            "description": "Clear, concise description of the deviation or issue."
+          },
+          "citation": {
+            "type": "string",
+            "description": "Source citation — exact clause reference in both deal and standard documents where applicable.",
+            "examples": ["Deal Cl. 5 vs Standard Cl. 5 (Law No. 8 of 2007 escrow requirement absent)"]
+          },
+          "routes_to": {
+            "type": "string",
+            "description": "Which authority tier this finding routes to per the HOD→FC→SEVC matrix.",
+            "examples": ["SEVC + Legal", "FC", "Compliance"]
+          }
+        }
+      }
+    },
+    "payment_validation": {
+      "type": "object",
+      "required": ["stated_total_pct", "computed_total_pct", "errors"],
+      "properties": {
+        "stated_total_pct": {
+          "type": "number",
+          "description": "Percentage total as stated in the payment plan.",
+          "examples": [98]
+        },
+        "computed_total_pct": {
+          "type": "number",
+          "description": "Percentage total recomputed by the validator.",
+          "examples": [98]
+        },
+        "down_payment_stated_pct": {
+          "type": "number",
+          "description": "Down payment percentage as stated in the schedule.",
+          "examples": [20]
+        },
+        "down_payment_computed_pct": {
+          "type": "number",
+          "description": "Down payment percentage recomputed from the stated AED amount.",
+          "examples": [19.23]
+        },
+        "errors": {
+          "type": "array",
+          "description": "List of payment schedule errors.",
+          "items": {
+            "type": "string"
+          },
+          "examples": [["Schedule totals 98% — 2% / AED 130,000 unallocated", "Down payment AED 1,250,000 = 19.23%, not 20%"]]
+        }
+      }
+    },
+    "kyc_flags": {
+      "type": "array",
+      "description": "KYC/AML flags identified during verification.",
+      "items": {
+        "type": "string"
+      },
+      "examples": [["Source of funds not provided", "Name mismatch: SPA 'John A. Smith' vs passport 'John Andrew Smithe'", "Sanctions/PEP screening not run"]]
+    },
+    "suggested_redlines": {
+      "type": "array",
+      "description": "Specific redline corrections required before the deal can proceed.",
+      "items": {
+        "type": "string"
+      },
+      "examples": [[
+        "Cl. 5: Restore mandatory escrow clause referencing project escrow account and Dubai Law No. 8 of 2007.",
+        "Cl. 13: Replace Seychelles jurisdiction with Dubai Courts (or DIFC Courts where agreed in writing).",
+        "Cl. 9: Correct structural DLP from 5 years to 10 years (mandatory under UAE law).",
+        "Cl. 7: Cap delay penalty at 1% per month, maximum 10% of amounts paid.",
+        "Cl. 4: Reinstate DLD Oqood interim-registration clause.",
+        "Payment plan: Correct to 100% total; increase down payment to AED 1,300,000 (20%)."
+      ]]
+    }
+  }
+}

@@ -51,14 +51,27 @@ docs/
 ## Backend Setup
 
 1. Create a virtual environment.
-2. Install the backend package.
+2. Install the backend dependencies.
 3. Run the API server.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e backend
+pip install -r backend/requirements.txt
 uvicorn app.main:app --reload --app-dir backend
+```
+
+Optional dependency sets:
+
+```bash
+pip install -r backend/requirements-openai.txt
+pip install -r backend/requirements-dev.txt
+```
+
+If you want the backend package installed in editable mode as well, use:
+
+```bash
+pip install -e backend
 ```
 
 The backend defaults to SQLite for zero-friction local setup:
@@ -242,6 +255,12 @@ MW_OPENAI_API_KEY=your_key_here
 MW_OPENAI_MODEL=gpt-4.1-mini
 ```
 
+Install the optional OpenAI dependency before using this mode:
+
+```bash
+pip install -r backend/requirements-openai.txt
+```
+
 The provider abstraction lives in [backend/app/services/llm_gateway.py](/Users/manzeem/MindWeave/backend/app/services/llm_gateway.py).
 
 ## Runtime Control Docs
@@ -264,6 +283,7 @@ The provider abstraction lives in [backend/app/services/llm_gateway.py](/Users/m
 Once dependencies are installed:
 
 ```bash
+pip install -r backend/requirements-dev.txt
 cd backend
 pytest
 ```

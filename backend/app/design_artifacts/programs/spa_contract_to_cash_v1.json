@@ -1,0 +1,157 @@
+{
+  "program_id": "spa_contract_to_cash_v1",
+  "version": "1.0.0",
+  "template_id": "spa_contract_to_cash_v1",
+  "policy": "priority_based",
+  "budget": {
+    "max_nodes": 14,
+    "max_tokens": 16000,
+    "max_runtime_seconds": 300
+  },
+  "convergence_rule": "no_pending_nodes",
+  "output_schema": "deal_brief_schema_v1",
+  "deterministic_defaults": {
+    "temperature": 0,
+    "seed": 7
+  },
+  "nodes": [
+    {
+      "id": "intake_scope",
+      "title": "Document Intake & Scope",
+      "subtitle": "Identify deal SPA, payment plan, KYC and standard template",
+      "operation_type": "generate",
+      "instruction": "You are reviewing an uploaded document set for a Dubai real estate SPA transaction. Identify each document and assign it a role: (a) reference standard (approved SPA template), (b) deal instrument (the SPA under review), (c) payment schedule, (d) KYC/AML pack. Record the unit reference, project name, buyer name, total purchase price (AED), and anticipated completion date. Output a structured document map. Do not perform any analysis yet.",
+      "priority": 10,
+      "depends_on": [],
+      "next": ["term_extraction"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 1, "row": 0},
+        "demo_explanation": "Maps all uploaded documents to their roles (deal SPA, standard template, payment plan, KYC pack) before any analysis begins."
+      }
+    },
+    {
+      "id": "term_extraction",
+      "title": "SPA Term Extraction",
+      "subtitle": "Extract parties, price, dates, obligations from the deal SPA",
+      "operation_type": "analyze",
+      "instruction": "From the deal SPA, extract all structured key terms: seller name and entity, buyer name and nationality, unit reference and project name, total purchase price in AED, payment schedule percentages and milestone labels, anticipated completion date, jurisdiction clause text, delay penalty clause text, structural defects liability period (DLP), and whether a DLD/Oqood registration clause is present. List the clause numbers and their verbatim text for any terms that deviate from standard practice. Output a structured term sheet that the four downstream verification nodes can reference.",
+      "priority": 20,
+      "depends_on": ["intake_scope"],
+      "next": ["clause_deviation_check", "payment_plan_validation", "kyc_aml_check", "compliance_check"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 1, "row": 1},
+        "demo_explanation": "Extracts structured key terms from the deal SPA — parties, price, payment schedule, jurisdiction, DLP, delay clauses — to feed all four downstream verify nodes."
+      }
+    },
+    {
+      "id": "clause_deviation_check",
+      "title": "Clause Deviation Checker",
+      "subtitle": "Compare deal SPA vs approved standard template clause-by-clause",
+      "operation_type": "verify",
+      "instruction": "Compare the deal SPA against the approved standard SPA template clause by clause. For every clause that deviates, record: (1) the clause number, (2) the exact deal text, (3) the exact standard text, (4) the nature of the deviation, (5) severity (critical / high / medium / low), and (6) which authority tier it routes to per the HOD→FC→SEVC matrix (HOD for operational wording; FC for financial/payment terms; SEVC for price, jurisdiction, escrow, or statutory clauses). Pay particular attention to: payment account routing vs escrow account (Clause 5), governing law and jurisdiction (Clause 13), structural defects liability period (Clause 9), delay penalty rate and cap (Clause 7), DLD/Oqood registration (Clause 4), and handover payment percentage (Clause 3). Cite every finding to both the deal and the standard.",
+      "priority": 30,
+      "depends_on": ["term_extraction"],
+      "next": ["risk_aggregation"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 0, "row": 2},
+        "demo_explanation": "Retrieves the standard SPA template from the knowledge base and compares each clause. Every finding is cited to the exact source clause in both the deal and the standard."
+      }
+    },
+    {
+      "id": "payment_plan_validation",
+      "title": "Payment Plan Validator",
+      "subtitle": "Recompute schedule totals and verify down-payment AED amount",
+      "operation_type": "verify",
+      "instruction": "Validate the payment plan against the total purchase price from the deal SPA. For each installment: (1) recompute the expected AED amount from the stated percentage and the total price, (2) compare against the stated AED amount, and (3) flag any discrepancy. Sum all stated percentages and flag if the total does not equal exactly 100%. Check whether any milestone due date falls after the anticipated completion date, which would be a sequencing error. Output stated_total_pct, computed_total_pct, and a list of errors with severity (high: arithmetic error or >2% gap; medium: sequencing issue).",
+      "priority": 31,
+      "depends_on": ["term_extraction"],
+      "next": ["risk_aggregation"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 0, "row": 3},
+        "demo_explanation": "Uses the calculator tool to recompute schedule percentages and AED amounts. Flags any installment that is out of sequence with the completion date."
+      }
+    },
+    {
+      "id": "kyc_aml_check",
+      "title": "KYC / AML Verification",
+      "subtitle": "Verify KYC pack; flag source-of-funds gaps, name mismatches, screening status",
+      "operation_type": "verify",
+      "instruction": "Review the buyer KYC/AML pack against the deal SPA. Check: (1) whether the buyer name on the SPA, the passport, and any bank reference match exactly — flag every discrepancy; (2) whether source/proof of funds documentation is present — this is mandatory for AML compliance on transactions above AED 2M; (3) whether sanctions and PEP screening has been completed; (4) whether the address on the bank reference matches the SPA notice address; (5) whether the signed reservation form is on file; (6) whether the passport expires before the anticipated completion date. Assign severity: Critical for missing source-of-funds or unrun screening; High for name mismatches; Medium for address discrepancies or missing reservation; Low for passport near-expiry. Route all Critical and High findings to Compliance.",
+      "priority": 32,
+      "depends_on": ["term_extraction"],
+      "next": ["risk_aggregation"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 2, "row": 2},
+        "demo_explanation": "Cross-checks buyer name across SPA, passport and bank reference. Flags missing source-of-funds declaration, unrun sanctions/PEP screening, and address discrepancies."
+      }
+    },
+    {
+      "id": "compliance_check",
+      "title": "DLD / RERA / Escrow Compliance",
+      "subtitle": "Verify DLD registration, Oqood, and escrow account requirements",
+      "operation_type": "verify",
+      "instruction": "Check the deal SPA against Dubai and UAE statutory requirements for off-plan property sales: (1) DLD registration and Oqood interim registration — the SPA must include a clause requiring the Developer to register the interim contract with the Dubai Land Department; (2) Escrow compliance — buyer payments must be directed to the project escrow account maintained under Dubai Law No. 8 of 2007, not to the developer's operating account; (3) RERA buyer-default remedy reference under Dubai Law No. 13 of 2008; (4) Structural defects liability — under the UAE Civil Transactions Law, the contractor and developer are jointly liable for structural defects for 10 years from completion; a clause reducing this to fewer than 10 years is unlawful. Mark each requirement PASS or FAIL with the exact clause text supporting the determination. Route all FAILs to SEVC + Legal.",
+      "priority": 33,
+      "depends_on": ["term_extraction"],
+      "next": ["risk_aggregation"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 2, "row": 3},
+        "demo_explanation": "Checks DLD/RERA regulatory requirements: Oqood interim registration, escrow compliance with Dubai Law No. 8 of 2007, and 4% DLD fee attribution."
+      }
+    },
+    {
+      "id": "risk_aggregation",
+      "title": "Risk Aggregation",
+      "subtitle": "Severity-rank all findings and determine approval routing",
+      "operation_type": "aggregate",
+      "instruction": "Consolidate all findings from the four verification nodes (clause_deviation_check, payment_plan_validation, kyc_aml_check, compliance_check). Produce a single severity-ranked list ordered Critical → High → Medium → Low. For each finding include its id, area, severity, description, source citation, and authority routing. Apply the HOD→FC→SEVC matrix to determine the minimum required approval tier: if any finding routes to SEVC, the overall required authority is SEVC; if any finding routes to FC (and none to SEVC), required authority is FC; otherwise HOD. Produce an overall recommendation: APPROVE (no Critical/High findings), HOLD (any Critical/High finding requiring SEVC or Compliance), or REJECT (escrow breach, statutory violation, or KYC block). Output total finding counts by severity.",
+      "priority": 50,
+      "depends_on": ["clause_deviation_check", "payment_plan_validation", "kyc_aml_check", "compliance_check"],
+      "next": ["human_review"],
+      "guarded_by": ["clause_deviation_check", "payment_plan_validation", "kyc_aml_check", "compliance_check"],
+      "metadata": {
+        "layout": {"column": 1, "row": 4},
+        "demo_explanation": "Aggregates all findings from the four verify nodes, assigns severity scores, and applies the HOD→FC→SEVC authority matrix to determine the required approval tier."
+      }
+    },
+    {
+      "id": "human_review",
+      "title": "Authority Gate (HOD / FC / SEVC)",
+      "subtitle": "Human approval required before deal brief can be issued",
+      "operation_type": "verify",
+      "instruction": "Summarise the risk aggregation findings and clearly state: (1) the overall recommendation (APPROVE / HOLD / REJECT), (2) the required authority tier and why, (3) the specific findings that triggered the highest authority level, and (4) what the reviewer must confirm before approving. Present this as a reviewer-ready briefing note. Do not produce the deal brief — that is the next node. This node is a gate: execution pauses here and will not proceed until a human reviewer approves or rejects.",
+      "priority": 60,
+      "required_approvals": 1,
+      "depends_on": ["risk_aggregation"],
+      "next": ["deal_brief_synthesis"],
+      "guarded_by": [],
+      "metadata": {
+        "layout": {"column": 1, "row": 5},
+        "requires_human_review": true,
+        "control_level": "regulated",
+        "demo_explanation": "Enforces the authority matrix: HOD for operational wording, FC for financial/payment terms, SEVC for price, jurisdiction, escrow, or statutory clauses. Nothing executes past this node without a human signature."
+      }
+    },
+    {
+      "id": "deal_brief_synthesis",
+      "title": "Deal Brief Synthesis",
+      "subtitle": "Schema-validated deal brief with findings, redlines, and recommendation",
+      "operation_type": "synthesize",
+      "instruction": "Produce the final deal brief conforming to deal_brief_schema_v1. Include: (1) recommendation — one sentence with APPROVE / HOLD / REJECT and rationale; (2) authority_routing — which tier is required and why; (3) findings — all findings from risk_aggregation, severity-ranked, each with id, area, severity, description, and citation; (4) payment_validation — stated_total_pct, computed_total_pct, down_payment_stated_pct, down_payment_computed_pct, and errors list; (5) kyc_flags — plain-text list of every KYC/AML gap; (6) suggested_redlines — one specific redline instruction per finding that requires a contract change, e.g. 'Cl. 5: Restore mandatory escrow clause referencing project escrow account and Dubai Law No. 8 of 2007.' The output must validate against deal_brief_schema_v1.",
+      "priority": 70,
+      "depends_on": ["human_review"],
+      "next": [],
+      "guarded_by": ["human_review"],
+      "metadata": {
+        "layout": {"column": 1, "row": 6},
+        "demo_explanation": "Produces the one-page deal brief: overall recommendation, severity-ranked findings with source-clause citations, payment validation summary, KYC flags, and suggested redlines — all schema-validated against deal_brief_schema_v1."
+      }
+    }
+  ]
+}

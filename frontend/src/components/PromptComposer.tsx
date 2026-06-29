@@ -19,6 +19,7 @@ interface PromptComposerProps {
   files: File[];
   isSubmitting: boolean;
   offlineDemo: boolean;
+  countdownTime?: number | null;
   isNodeSelected?: boolean; // New prop
 }
 
@@ -39,6 +40,7 @@ export function PromptComposer({
   files,
   isSubmitting,
   offlineDemo,
+  countdownTime = null,
   isNodeSelected = false,
 }: PromptComposerProps) {
   // Local state to manage expansion
@@ -69,12 +71,6 @@ export function PromptComposer({
             )}
           </div>
         </div>
-
-        {offlineDemo && (
-          <div className="rounded-full border border-[var(--mw-border)] bg-[var(--mw-accent-soft)] px-3 py-2 text-[10px] uppercase tracking-[0.22em] text-[var(--mw-accent)]">
-            Offline demo mode
-          </div>
-        )}
       </button>
 
       <AnimatePresence initial={false}>
@@ -185,7 +181,9 @@ export function PromptComposer({
                   {isSubmitting ? (
                     <>
                       <LoaderCircle size={15} className="animate-spin" strokeWidth={1.8} />
-                      Running
+                      {countdownTime !== null 
+                        ? `${Math.floor(countdownTime / 60)}:${(countdownTime % 60).toString().padStart(2, "0")}`
+                        : "Running"}
                     </>
                   ) : (
                     "Submit"

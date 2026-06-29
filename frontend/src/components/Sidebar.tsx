@@ -33,8 +33,8 @@ export function Sidebar({ activeItem, onSelect, theme, onToggleTheme }: SidebarP
   return (
     <aside className="relative flex w-[96px] flex-col border-r border-[var(--mw-border)] bg-[var(--mw-page)] px-3 py-4 text-[var(--mw-text)]">
       <div className="mb-8 flex h-16 flex-col items-center justify-center">
-        <img src={logoSrc} alt="MindWeave" className="h-9 w-9 object-contain" />
-        <div className="mt-1 text-[9px] uppercase tracking-[0.32em] text-[var(--mw-subtle)]">MindWeave</div>
+        <img src={logoSrc} alt="Keturah AI Spine" className="h-9 w-9 object-contain" />
+        <div className="mt-1 text-[9px] uppercase tracking-[0.32em] text-[var(--mw-subtle)]">Keturah AI</div>
       </div>
 
       <nav className="flex flex-1 flex-col gap-2.5">

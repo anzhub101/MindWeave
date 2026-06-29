@@ -1,0 +1,18 @@
+{
+  "template_id": "spa_contract_to_cash_v1",
+  "version": "1.0.0",
+  "name": "SPA Contract-to-Cash Review",
+  "description": "Reviews a Sale & Purchase Agreement against the approved standard template. Extracts obligations, checks clause deviations, validates the payment plan, verifies the KYC pack, and routes findings to the HOD→FC→SEVC authority matrix for human approval before issuing the deal brief.",
+  "domain": "legal_contracts",
+  "tags": ["contract", "SPA", "real-estate", "KYC", "AML", "payment-plan", "DLD", "RERA"],
+  "program_id": "spa_contract_to_cash_v1",
+  "output_schema": "deal_brief_schema_v1",
+  "suggested_prompt": "Review the SPA for Unit KR-1807 against the approved standard SPA template v3.0. Identify and cite all clause deviations; validate the payment plan against the purchase price and schedule; verify the buyer KYC pack and flag AML gaps; check DLD/RERA/escrow compliance. Produce a one-page deal brief with severity-ranked findings and suggested redlines, and route for human approval per the HOD→FC→SEVC authority matrix. Do not approve any money or title action.",
+  "suggested_control_level": "regulated",
+  "suggested_determinism_mode": "best_effort_deterministic",
+  "metadata": {
+    "authority_matrix": "HOD (operational wording) → FC (financial/payment terms) → SEVC (price, jurisdiction, escrow, statutory clauses)",
+    "reference_standard": "01_Standard_SPA_Template_v3",
+    "jurisdiction": "Dubai, UAE"
+  }
+}

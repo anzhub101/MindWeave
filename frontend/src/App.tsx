@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { X } from "lucide-react";
+import { LoaderCircle, X } from "lucide-react";
 import {
   applyGraphPatch,
   applyPlannedChange,
@@ -143,6 +143,8 @@ function sleep(ms: number) {
   });
 }
 
+const DEMO_RUNTIME_ENABLED = false;
+
 function nodeLabelList(task: TaskRunResponse, nodeIds: string[]) {
   if (!nodeIds.length) {
     return "none";
@@ -189,7 +191,7 @@ function buildDemoNodeCreationAnswer(
         .slice(0, 2)
         .map((reference) => reference.document_name || reference.document_id)
         .join(" and ")}.`
-    : "It currently has no direct evidence links in the demo payload.";
+    : "It currently has no direct evidence links in the current run.";
   const approvalSummary =
     (node.approval_state?.required_approvals ?? 0) > 0
       ? `It also carries a review checkpoint because ${node.title.toLowerCase()} affects the final audit conclusion.`
@@ -208,19 +210,47 @@ function buildDemoCopilotReply(
   message: string,
 ) {
   const normalized = message.toLowerCase();
+  const demoParagraph =
+    typeof node.metadata?.demo_copilot_paragraph === "string" ? node.metadata.demo_copilot_paragraph.trim() : "";
+  const demoSkillResult =
+    node.metadata?.demo_skill_result && typeof node.metadata.demo_skill_result === "object"
+      ? (node.metadata.demo_skill_result as Record<string, unknown>)
+      : null;
+  if (
+    demoSkillResult &&
+    (normalized.includes("run") ||
+      normalized.includes("skill") ||
+      normalized.includes("tool") ||
+      normalized.includes("execute"))
+  ) {
+    return `${node.title} executed its deployed skill and returned a structured result. ${prettyDemoObject(
+      demoSkillResult,
+    )} The important audit point is that the graph separates deterministic tool output from judgment: the skill provides the facts, and downstream reasoning evaluates audit impact.`;
+  }
+  if (demoParagraph && (normalized.includes("deep") || normalized.includes("explain") || normalized.includes("reason"))) {
+    return demoParagraph;
+  }
   if (isWhyNodeCreatedQuestion(normalized)) {
     return buildDemoNodeCreationAnswer(node, task, nodeDetail);
   }
   if (normalized.includes("evidence") || normalized.includes("support")) {
     const references = (nodeDetail?.top_evidence?.length ? nodeDetail.top_evidence : node.evidence_refs).slice(0, 3);
     if (!references.length) {
-      return `${node.title} does not have explicit evidence links in the demo payload, so I would treat it as a planning or orchestration node and ask for supporting audit evidence before relying on it.`;
+      return `${node.title} does not have explicit source links in the current run, so I would treat it as a planning or orchestration node and ask for supporting audit evidence before relying on it.`;
     }
     return `${node.title} is supported by ${references
       .map((reference) => reference.document_name || reference.document_id)
       .join(", ")}. Those sources anchor the node's conclusion and explain why it sits where it does in the audit flow.`;
   }
+  if (demoParagraph) {
+    return demoParagraph;
+  }
   return `${buildDemoNodeCreationAnswer(node, task, nodeDetail)} If you want, ask about the evidence, the downstream impact, or why this node uses ${node.executor_type ?? "llm_operator"} execution.`;
+}
+
+function prettyDemoObject(value: Record<string, unknown>) {
+  const entries = Object.entries(value).slice(0, 5);
+  return entries.map(([key, entry]) => `${key.replace(/[_-]+/g, " ")}: ${JSON.stringify(entry)}`).join("; ");
 }
 
 function nextOfflineProgramVersion(version: string) {
@@ -491,6 +521,7 @@ export default function App() {
   const [skillDraft, setSkillDraft] = useState<SkillArtifact>(createBlankSkillDraft(mockSkills[0] ?? {}));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedNodeDetail, setSelectedNodeDetail] = useState<NodeDetailResponse | null>(null);
+  const [countdownTime, setCountdownTime] = useState<number | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isPlanningChange, setIsPlanningChange] = useState(false);
   const [isApplyingPlannedChange, setIsApplyingPlannedChange] = useState(false);
@@ -508,10 +539,10 @@ export default function App() {
   const [isPassingNode, setIsPassingNode] = useState(false);
   const [isSendingNodeChat, setIsSendingNodeChat] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
-  const [offlineDemo, setOfflineDemo] = useState(true);
+  const [offlineDemo, setOfflineDemo] = useState(false);
   const [determinismMode, setDeterminismMode] = useState<DeterminismMode>("best_effort_deterministic");
-  const [controlLevel, setControlLevel] = useState<ControlLevel>("operational");
-  const [autoApproveHumanReview, setAutoApproveHumanReview] = useState(true);
+  const [controlLevel, setControlLevel] = useState<ControlLevel>("regulated");
+  const [autoApproveHumanReview, setAutoApproveHumanReview] = useState(false);
   const [plannedChange, setPlannedChange] = useState<PlanChangeResponse | null>(null);
   const [reasoningTrace, setReasoningTrace] = useState<ReasoningTraceResponse | null>(null);
   const [skillTestResult, setSkillTestResult] = useState<SkillTestResult | null>(null);
@@ -543,6 +574,17 @@ export default function App() {
     let cancelled = false;
 
     async function loadInitialData() {
+      if (DEMO_RUNTIME_ENABLED) {
+        setHistory(mockHistory);
+        setTemplates(mockTemplates);
+        setSkills(mockSkills);
+        setTask(mockTask);
+        setOfflineDemo(true);
+        setIsLoadingTemplates(false);
+        setIsLoadingSkills(false);
+        return;
+      }
+
       setIsLoadingTemplates(true);
       setIsLoadingSkills(true);
       const [tasksResult, templatesResult, skillsResult] = await Promise.allSettled([
@@ -762,7 +804,102 @@ export default function App() {
         ? "Main Dashboard"
         : activeItem.replace(/-/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
   const pageEyebrow =
-    activeItem === "reasoning" ? "Trace Workspace" : activeItem === "dashboard" ? "MindWeave Operator" : "Workspace";
+    activeItem === "reasoning" ? "Trace Workspace" : activeItem === "dashboard" ? "Keturah AI Spine" : "Workspace";
+
+  function approveDemoNode(nodeId: string, reviewer = "dashboard-user") {
+    const timestamp = new Date().toISOString();
+    let approvedTitle = nodeId;
+    let nextPendingTitle: string | null = null;
+
+    setTask((current) => {
+      const nextTask = structuredClone(current);
+      const targetNode = nextTask.nodes.find((node) => node.id === nodeId);
+      if (!targetNode) {
+        return current;
+      }
+
+      approvedTitle = targetNode.title;
+      const requiredApprovals = Math.max(targetNode.approval_state?.required_approvals ?? targetNode.required_approvals ?? 1, 1);
+      targetNode.status = "completed";
+      targetNode.verification_status = "passed";
+      targetNode.completed_at = timestamp;
+      targetNode.required_approvals = requiredApprovals;
+      targetNode.approval_state = {
+        required_approvals: requiredApprovals,
+        approved_count: requiredApprovals,
+        pending_approvals: 0,
+        requires_human_review: false,
+        status: "approved",
+      };
+      targetNode.verification_checks = [
+        ...(targetNode.verification_checks ?? []).filter((check) => !check.toLowerCase().includes("awaiting")),
+        `Approved by ${reviewer} during demo review.`,
+      ];
+
+      const remainingPending = nextTask.nodes.find((node) => (node.approval_state?.pending_approvals ?? 0) > 0);
+      nextTask.pending_review_node_id = remainingPending?.id ?? null;
+      nextPendingTitle = remainingPending?.title ?? null;
+      nextTask.review_history = [
+        ...nextTask.review_history,
+        {
+          timestamp,
+          node_id: nodeId,
+          reviewer,
+          decision: "approved",
+          comments: "Approved in guided replay.",
+        },
+      ];
+
+      if (!remainingPending) {
+        const finalNode = nextTask.nodes.find((node) => node.id === "final_opinion");
+        if (finalNode) {
+          finalNode.status = "completed";
+          finalNode.verification_status = "passed";
+          finalNode.completed_at = timestamp;
+          finalNode.output = {
+            ...finalNode.output,
+            package_status: "Ready for export",
+            final_opinion: "Qualified if revenue cutoff adjustment is not recorded",
+          };
+          finalNode.verification_checks = ["Partner gate cleared.", "Final synthesis package is export-ready."];
+        }
+        nextTask.status = "completed";
+        nextTask.completed_at = timestamp;
+        nextTask.final_output = {
+          ...(nextTask.final_output ?? {}),
+          open_approval_gates: [],
+          package_status: "Ready for export",
+        };
+        nextTask.final_summary = {
+          headline: "Invisium audit workflow completed",
+          verdict: "Qualified draft ready",
+          key_points: [
+            "All approval gates have been cleared.",
+            "Revenue cutoff exceptions remain the key audit finding.",
+            "The final report package is ready for export.",
+          ],
+          metrics: [
+            { label: "Nodes", value: String(nextTask.nodes.length) },
+            { label: "Approvals", value: "2/2" },
+            { label: "Cutoff exposure", value: "$214.5k" },
+            { label: "Status", value: "Ready" },
+          ],
+        };
+      } else {
+        nextTask.status = "paused";
+      }
+
+      return nextTask;
+    });
+
+    setSelectedNodeDetail(null);
+    setWorkspaceNotice({
+      tone: "info",
+      message: nextPendingTitle
+        ? `Approved ${approvedTitle}. Next approval gate: ${nextPendingTitle}.`
+        : `Approved ${approvedTitle}. All approval gates are clear.`,
+    });
+  }
 
   function handleToggleSummary() {
     setActiveReasoningModal(null);
@@ -799,44 +936,60 @@ export default function App() {
 
   async function handleSubmit() {
     setIsSubmitting(true);
+
+    let elapsedSeconds = 0;
+    setCountdownTime(elapsedSeconds);
+    const interval = setInterval(() => {
+      elapsedSeconds += 1;
+      setCountdownTime(elapsedSeconds);
+    }, 1000);
+
     try {
-      const sourceUrls = parseSourceUrls(sourceUrlsText);
       const nextTask = await executeTask(
         prompt,
         uploadedFiles,
-        sourceUrls,
+        parseSourceUrls(sourceUrlsText),
         determinismMode,
         controlLevel,
         autoApproveHumanReview,
       );
+      clearInterval(interval);
+      setCountdownTime(null);
       syncTaskState(nextTask);
+      setOfflineDemo(false);
       setActiveItem("reasoning");
       setActiveReasoningModal(null);
       setSelectedNodeId(null);
       setSelectedNodeDetail(null);
       setUploadedFiles([]);
       setSourceUrlsText("");
-      setOfflineDemo(false);
-      setWorkspaceNotice({
-        tone: "info",
-        message: `Executed ${nextTask.task_id} in ${nextTask.determinism_mode?.replace(/_/g, " ") ?? "runtime"} mode.`,
-      });
-      const latestHistory = await fetchTasks().catch(() => history);
-      setHistory(latestHistory);
-    } catch (error) {
-      setTask(mockTask);
+      try {
+        const latestHistory = await fetchTasks();
+        setHistory(latestHistory);
+      } catch {
+        // ignore history refresh failure
+      }
+    } catch {
+      clearInterval(interval);
+      setCountdownTime(null);
+      setTask(structuredClone(mockTask));
+      setActiveItem("reasoning");
+      setActiveReasoningModal(null);
       setSelectedNodeId(null);
+      setSelectedNodeDetail(null);
+      setUploadedFiles([]);
+      setSourceUrlsText("");
       setOfflineDemo(true);
-      setWorkspaceNotice({
-        tone: "error",
-        message: formatError(error),
-      });
     } finally {
       setIsSubmitting(false);
     }
   }
 
   async function handleReview(decision: "approved" | "rejected") {
+    if (offlineDemo && task.pending_review_node_id && decision === "approved") {
+      approveDemoNode(task.pending_review_node_id, "summary-reviewer");
+      return;
+    }
     if (!task.pending_review_node_id || offlineDemo) {
       return;
     }
@@ -1036,6 +1189,54 @@ export default function App() {
     },
   ) {
     if (offlineDemo) {
+      const timestamp = new Date().toISOString();
+      setTask((current) => {
+        const nextTask = structuredClone(current);
+        const targetNode = nextTask.nodes.find((node) => node.id === nodeId);
+        if (!targetNode) {
+          return current;
+        }
+        targetNode.executor_type = payload.executor_type;
+        targetNode.executor_profile = payload.executor_profile ?? null;
+        targetNode.max_child_agents = payload.max_child_agents ?? 0;
+        targetNode.max_recursion_depth = payload.max_recursion_depth ?? 0;
+        targetNode.child_token_budget = payload.child_token_budget ?? 0;
+        targetNode.delegated_summary_required = payload.delegated_summary_required ?? false;
+        targetNode.metadata = {
+          ...targetNode.metadata,
+          skill_artifact_id: payload.skill_artifact_id ?? undefined,
+          demo_execution_applied_at: timestamp,
+        };
+        targetNode.output = {
+          ...targetNode.output,
+          demo_execution_mode:
+            payload.skill_artifact_id
+              ? `Deployed ${payload.skill_artifact_id} with ${payload.executor_type}.`
+              : `Updated executor to ${payload.executor_type}.`,
+        };
+        targetNode.patch_history = [...(targetNode.patch_history ?? []), "offline_executor_update"];
+        nextTask.graph_patch_history = [
+          ...(nextTask.graph_patch_history ?? []),
+          {
+            patch_id: `offline_executor_${Date.now()}`,
+            patch_type: "change_executor",
+            target_node_id: nodeId,
+            change_reason: payload.change_reason ?? `Updated execution mode for ${nodeId}.`,
+            requested_by: "dashboard-user",
+            approved_by: "system-demo",
+            payload,
+            resulting_program_version: nextTask.program_version,
+            auto_rerun: payload.auto_rerun ?? true,
+            applied_at: timestamp,
+          },
+        ];
+        return nextTask;
+      });
+      setSelectedNodeDetail(null);
+      setWorkspaceNotice({
+        tone: "info",
+        message: `Demo execution mode updated for ${nodeId}.`,
+      });
       return;
     }
     setIsSubmitting(true);
@@ -1106,6 +1307,7 @@ export default function App() {
 
   async function handlePassAndVerifyNode(nodeId: string) {
     if (offlineDemo) {
+      approveDemoNode(nodeId, "node-inspector");
       return;
     }
     setIsPassingNode(true);
@@ -1348,11 +1550,20 @@ export default function App() {
       [key]: nextHistory,
     }));
     setIsSendingNodeChat(true);
-    const minimumResponseDelayMs = 2200 + Math.round(Math.random() * 500);
+    const minimumResponseDelayMs = 900 + Math.round(Math.random() * 450);
     const responseStartedAt = Date.now();
     try {
       if (offlineDemo) {
         const reply = buildDemoCopilotReply(node, task, relevantNodeDetail, trimmedMessage);
+        const demoSkillResult =
+          node.metadata?.demo_skill_result && typeof node.metadata.demo_skill_result === "object"
+            ? (node.metadata.demo_skill_result as Record<string, unknown>)
+            : null;
+        const usedSkill =
+          demoSkillResult &&
+          /run|skill|tool|execute/i.test(trimmedMessage)
+            ? [{ tool: String(demoSkillResult.tool ?? node.metadata.skill_artifact_id ?? "demo_skill"), ...demoSkillResult }]
+            : [];
         const remainingDelay = minimumResponseDelayMs - (Date.now() - responseStartedAt);
         if (remainingDelay > 0) {
           await sleep(remainingDelay);
@@ -1367,13 +1578,14 @@ export default function App() {
             task_id: task.task_id,
             node_id: nodeId,
             reply,
-            tool_results: [],
+            tool_results: usedSkill,
             suggested_actions: [
               "Why was this node created?",
               "What evidence supports this node?",
+              node.metadata?.demo_skill_result ? "Run the deployed skill" : `Explain ${node.title} in depth`,
               `What happens after ${node.title}?`,
             ],
-            model_metadata: { provider: "offline_demo" },
+            model_metadata: { provider: "local_replay" },
           },
         }));
         return;
@@ -1556,7 +1768,8 @@ export default function App() {
                   onAutoApproveHumanReviewChange={setAutoApproveHumanReview}
                   files={uploadedFiles}
                   isSubmitting={isSubmitting}
-                  offlineDemo={offlineDemo}
+                  offlineDemo={false}
+                  countdownTime={countdownTime}
                   isNodeSelected={false}
                 />
               </OverlayModal>
@@ -1726,7 +1939,7 @@ function ReasoningWorkspace({
       <PanelResizeHandle width={rightPanelWidth} onWidthChange={onRightPanelWidthChange} />
       <aside
         className="min-h-0 border-l border-[var(--mw-border)] bg-[var(--mw-page)] px-3 pb-3 pt-3"
-        style={{ width: rightPanelWidth }}
+        style={{ width: rightPanelWidth, zoom: rightPanelWidth < 450 ? 0.8 : 1 }}
       >
         <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto pr-1">
           {sidePanel}

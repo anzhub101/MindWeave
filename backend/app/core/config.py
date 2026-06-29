@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,7 +13,9 @@ class Settings(BaseSettings):
     app_name: str = "MindWeave"
     api_prefix: str = "/api"
     database_url: str = "sqlite:///./mindweave.db"
-    allowed_hosts: list[str] = ["localhost", "127.0.0.1"]
+    # TrustedHostMiddleware will reject requests whose Host header isn't here.
+    # In hosted environments (e.g. Render), the public hostname is typically `*.onrender.com`.
+    allowed_hosts: list[str] = ["localhost", "127.0.0.1", "*.onrender.com", "mindweave.onrender.com"]
     force_https: bool = False
     storage_backend: str = "local"
     llm_provider: str = "k2"
@@ -70,6 +73,9 @@ class Settings(BaseSettings):
     chunkr_enable_pdf_ocr_fallback: bool = True
     chunkr_pdf_char_threshold: int = 120
     chunkr_ocr_strategy: str = "Auto"
+    cache_backend: str = "sql"
+    redis_url: str | None = None
+    cache_ttl_seconds: int = 0
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     storage_root: Path = Path(__file__).resolve().parents[2] / "data"
     artifact_root: Path = Path(__file__).resolve().parents[1] / "design_artifacts"
@@ -79,6 +85,20 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="MW_", extra="ignore")
 
+    @field_validator("allowed_hosts", "cors_origins", mode="before")
+    @classmethod
+    def _parse_csv_or_json_list(cls, v):
+        # Render dashboard env vars are often entered as comma-separated strings.
+        # Pydantic will already handle real JSON lists (e.g. '["a","b"]').
+        if isinstance(v, str):
+            raw = v.strip()
+            if not raw:
+                return []
+            if raw.startswith("[") and raw.endswith("]"):
+                return v
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return v
+
     @property
     def resolved_pinecone_api_key(self) -> str | None:
         return self.pinecone_api_key or os.getenv("PINECONE_API_KEY")
@@ -86,6 +106,10 @@ class Settings(BaseSettings):
     @property
     def resolved_brave_api_key(self) -> str | None:
         return self.brave_api_key or os.getenv("BRAVE_API_KEY")
+
+    @property
+    def resolved_redis_url(self) -> str | None:
+        return self.redis_url or os.getenv("REDIS_URL")
 
     @property
     def resolved_k2_api_key(self) -> str | None:

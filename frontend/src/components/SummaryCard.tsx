@@ -21,6 +21,66 @@ interface SummaryCardProps {
   onExport: () => void;
 }
 
+type SummaryData = NonNullable<SummaryCardProps["summary"]>;
+
+function hasText(value: string | undefined | null) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasRenderableSummary(summary: SummaryCardProps["summary"]) {
+  if (!summary) {
+    return false;
+  }
+  if (hasText(summary.headline) || hasText(summary.verdict)) {
+    return true;
+  }
+  if (summary.key_points.some((point) => hasText(point))) {
+    return true;
+  }
+  return summary.metrics.some((metric) => hasText(metric.label) || hasText(metric.value));
+}
+
+function buildFallbackSummary(
+  status: SummaryCardProps["status"],
+  determinismMode?: string,
+  controlLevel?: string,
+  modelVersion?: string,
+): SummaryData {
+  const statusLabel = status.replace(/_/g, " ");
+  const headline =
+    status === "completed"
+      ? "Summary unavailable"
+      : status === "running"
+        ? "Run in progress"
+        : status === "queued"
+          ? "Run queued"
+          : status === "failed"
+            ? "Run ended without a summary"
+            : "Human Review Required";
+  const keyPoint =
+    status === "completed"
+      ? "The run completed, but no populated summary card was returned. Review the final output or audit package for details."
+      : status === "running"
+        ? "This run has not produced its final summary yet. Check the graph and node outputs while execution continues."
+        : status === "queued"
+          ? "The run has not started producing output yet. A summary will appear after execution begins."
+          : status === "failed"
+            ? "The run did not finish with a usable summary. Check the node logs and final output for failure details."
+            : "Execution is paused awaiting reviewer input before the final summary can be produced.";
+
+  return {
+    headline,
+    verdict: statusLabel.charAt(0).toUpperCase() + statusLabel.slice(1),
+    key_points: [keyPoint],
+    metrics: [
+      { label: "Status", value: statusLabel },
+      { label: "Mode", value: determinismMode ? determinismMode.replace(/_/g, " ") : "runtime" },
+      { label: "Control", value: controlLevel ? controlLevel.replace(/_/g, " ") : "control" },
+      { label: "Model", value: modelVersion || "unavailable" },
+    ],
+  };
+}
+
 export function SummaryCard({
   status,
   determinismMode,
@@ -33,9 +93,14 @@ export function SummaryCard({
   onDismiss,
   onExport,
 }: SummaryCardProps) {
-  if (!summary && status !== "paused") {
-    return null;
-  }
+  const displaySummary = hasRenderableSummary(summary)
+    ? {
+        headline: summary!.headline.trim(),
+        verdict: summary!.verdict.trim(),
+        key_points: summary!.key_points.filter((point) => hasText(point)).map((point) => point.trim()),
+        metrics: summary!.metrics.filter((metric) => hasText(metric.label) || hasText(metric.value)),
+      }
+    : buildFallbackSummary(status, determinismMode, controlLevel, modelVersion);
 
   return (
     <div className="soft-panel flex h-full flex-col overflow-hidden rounded-[28px] border border-[var(--mw-border)] shadow-[0_24px_80px_rgba(0,0,0,0.24)]">
@@ -45,13 +110,13 @@ export function SummaryCard({
             Run Summary
           </div>
           <div className="mt-2 font-sans text-[30px] font-semibold leading-[0.96] tracking-[-0.03em] text-[var(--mw-text)] lg:text-[38px]">
-            {summary?.headline ?? "Human Review Required"}
+            {displaySummary.headline}
           </div>
         </div>
 
         <div className="flex items-center gap-3">
           <span className="rounded-full border border-[var(--mw-border)] bg-[var(--mw-accent-soft)] px-3 py-1.5 text-[10px] uppercase tracking-[0.22em] text-[var(--mw-accent)]">
-            {summary?.verdict ?? "Paused"}
+            {displaySummary.verdict}
           </span>
           <button
             type="button"
@@ -66,11 +131,11 @@ export function SummaryCard({
 
       <div className="grid min-h-0 flex-1 gap-5 overflow-y-auto px-6 py-5 lg:grid-cols-[1.2fr_0.8fr] lg:px-8 lg:py-6">
         <div className="space-y-5">
-          {summary ? (
+          {displaySummary.metrics.length ? (
             <div className="grid gap-3 sm:grid-cols-2">
-              {summary.metrics.slice(0, 4).map((metric) => (
+              {displaySummary.metrics.slice(0, 4).map((metric) => (
                 <div
-                  key={metric.label}
+                  key={`${metric.label}:${metric.value}`}
                   className="rounded-[18px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4"
                 >
                   <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--mw-subtle)]">
@@ -87,7 +152,7 @@ export function SummaryCard({
           <div className="rounded-[20px] border border-[var(--mw-border)] bg-[var(--mw-node)] p-4 lg:p-5">
             <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--mw-subtle)]">Highlights</div>
             <div className="mt-3 space-y-3 text-[15px] leading-7 text-[var(--mw-muted)]">
-              {(summary?.key_points ?? ["Execution is paused awaiting reviewer input."]).map((point) => (
+              {displaySummary.key_points.map((point) => (
                 <div key={point}>{point}</div>
               ))}
             </div>
